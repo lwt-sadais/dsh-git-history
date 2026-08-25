@@ -89,6 +89,6 @@ src/
 
 ## 致谢与许可
 
-仓库树、子模块状态、ahead/behind 和提交历史交互参考了 [EnsoAI](https://github.com/enso-ai/enso) `test` 分支中的 Source Control 实现，并针对 DSH 的 Cordis 插件架构、Workspace 安全边界和主题系统进行了独立改写。
+仓库树、子模块状态、ahead/behind 和提交历史交互参考了 [J3n5en/EnsoAI](https://github.com/J3n5en/EnsoAI/tree/test) `test` 分支中的 Source Control 实现，并针对 DSH 的 Cordis 插件架构、Workspace 安全边界和主题系统进行了独立改写。
 
 EnsoAI 与本项目均采用 MIT License。详见 [`LICENSE`](LICENSE)。

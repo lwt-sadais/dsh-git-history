@@ -152,14 +152,14 @@ export class GitHistoryService {
       const childRoot = safeChild(root, path)
       if (childRoot === null) continue
       const childRepositoryId = childId(id, path)
-      const probe = await this.runner.run(['rev-parse', '--show-toplevel'], childRoot, signal)
       let initialized = false
-      if (probe.exitCode === 0) {
-        try {
-          initialized = await realpath(probe.stdout.trim()) === await realpath(childRoot)
-        } catch {
-          initialized = false
-        }
+      try {
+        const canonicalChild = await realpath(childRoot)
+        const probe = await this.runner.run(['rev-parse', '--show-toplevel'], canonicalChild, signal)
+        initialized = probe.exitCode === 0 && await realpath(probe.stdout.trim()) === canonicalChild
+      } catch {
+        // 未检出的目录或尚未初始化的 gitlink 仍作为禁用节点展示。
+        initialized = false
       }
       if (initialized) {
         children.push(await this.scanRepository(childRoot, childRepositoryId, shouldFetch, budget, identities, signal))
