@@ -1,0 +1,3 @@
+- insert:
+    - id: ui-git-history
+      name: 'dsh-git-history'

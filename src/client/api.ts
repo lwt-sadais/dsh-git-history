@@ -1,0 +1,34 @@
+import type { ApiResult, HistoryPage, HistoryRequest, RepositorySnapshot } from '../core/types.js'
+
+const FALLBACK: ApiResult<never> = {
+  ok: false,
+  error: { code: 'internal', message: 'Git history service is unavailable' },
+}
+
+/** 向插件宿主路由发送同源 JSON 请求，并将传输异常折叠为稳定错误。 */
+async function post<T>(route: string, body: unknown, signal?: AbortSignal): Promise<ApiResult<T>> {
+  try {
+    const response = await fetch(route, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      ...(signal === undefined ? {} : { signal }),
+    })
+    const value = await response.json() as unknown
+    if (value !== null && typeof value === 'object' && 'ok' in value) return value as ApiResult<T>
+    return FALLBACK
+  } catch (cause) {
+    if (cause instanceof DOMException && cause.name === 'AbortError') throw cause
+    return FALLBACK
+  }
+}
+
+/** 读取仓库树；fetch 为 true 时先更新远程跟踪引用。 */
+export function readRepositorySnapshot(path: string, fetchRemote: boolean, signal?: AbortSignal): Promise<ApiResult<RepositorySnapshot>> {
+  return post('/api/dsh-git-history/snapshot', { path, fetch: fetchRemote }, signal)
+}
+
+/** 分页读取指定仓库的提交历史。 */
+export function readHistory(request: HistoryRequest, signal?: AbortSignal): Promise<ApiResult<HistoryPage>> {
+  return post('/api/dsh-git-history/log', request, signal)
+}
