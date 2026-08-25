@@ -39,6 +39,15 @@ interface HistoryRequest {
   readonly skip: number;
   readonly limit: number;
 }
+interface SyncRequest {
+  readonly path: string;
+  readonly repositoryId: string;
+}
+interface SyncResult {
+  readonly branch: string | null;
+  readonly pulled: number;
+  readonly pushed: number;
+}
 interface ApiError {
   readonly code: 'workspace-unknown' | 'not-git-repository' | 'repository-unknown' | 'invalid-request' | 'internal';
   readonly message: string;
@@ -82,12 +91,18 @@ declare class GitHistoryService {
   private readIdentity;
   /** 在明确请求时更新远程跟踪引用；失败仅记录在对应仓库节点上。 */
   private fetch;
+  /** 先尝试快进拉取，失败时按 EnsoAI 行为改用 rebase，并在冲突后清理 rebase 状态。 */
+  private pull;
+  /** 推送被远端拒绝时先同步新增远端提交，再按 EnsoAI 行为重试一次。 */
+  private push;
   /** 递归扫描一个已初始化仓库，并建立仅供当前工作区使用的仓库路径清单。 */
   private scanRepository;
   /** 读取当前工作区仓库树，并按需自动 fetch 根仓库及递归子模块。 */
   snapshot(path: string, shouldFetch: boolean, signal?: AbortSignal): Promise<ApiResult<RepositorySnapshot>>;
   /** 分页读取服务端最近一次扫描确认过的仓库提交历史。 */
   history(request: HistoryRequest, signal?: AbortSignal): Promise<ApiResult<HistoryPage>>;
+  /** 按 EnsoAI 的同步顺序先拉取落后提交，再推送本地领先提交。 */
+  sync(request: SyncRequest, signal?: AbortSignal): Promise<ApiResult<SyncResult>>;
 }
 //#endregion
 //#region src/index.d.ts
@@ -96,5 +111,5 @@ declare const inject: string[];
 /** 组装工作区访问门、Git 服务和本地 API，并交由 Cordis 管理生命周期。 */
 declare function apply(ctx: Context): void;
 //#endregion
-export { type ApiError, type ApiResult, type CommitEntry, GitHistoryService, type HistoryPage, type HistoryRequest, type RepositoryNode, type RepositorySnapshot, type SnapshotRequest, apply, inject, name, parseAheadBehind, parseHistory, parseSubmodulePaths };
+export { type ApiError, type ApiResult, type CommitEntry, GitHistoryService, type HistoryPage, type HistoryRequest, type RepositoryNode, type RepositorySnapshot, type SnapshotRequest, type SyncRequest, type SyncResult, apply, inject, name, parseAheadBehind, parseHistory, parseSubmodulePaths };
 //# sourceMappingURL=index.d.ts.map

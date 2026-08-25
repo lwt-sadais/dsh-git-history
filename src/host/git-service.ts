@@ -8,6 +8,8 @@ import type {
   HistoryRequest,
   RepositoryNode,
   RepositorySnapshot,
+  SyncRequest,
+  SyncResult,
 } from '../core/types.js'
 
 const MAX_REPOSITORIES = 128
@@ -130,6 +132,24 @@ export class GitHistoryService {
     return message.slice(0, 500)
   }
 
+  /** 先尝试快进拉取，失败时按 EnsoAI 行为改用 rebase，并在冲突后清理 rebase 状态。 */
+  private async pull(root: string, signal?: AbortSignal): Promise<GitRunResult> {
+    const fastForward = await this.runner.run(['pull', '--ff-only'], root, signal)
+    if (fastForward.exitCode === 0) return fastForward
+    const rebase = await this.runner.run(['pull', '--rebase'], root, signal)
+    if (rebase.exitCode === 0) return rebase
+    await this.runner.run(['rebase', '--abort'], root, signal)
+    return rebase
+  }
+
+  /** 推送被远端拒绝时先同步新增远端提交，再按 EnsoAI 行为重试一次。 */
+  private async push(root: string, signal?: AbortSignal): Promise<GitRunResult> {
+    const initial = await this.runner.run(['push'], root, signal)
+    if (initial.exitCode === 0 || !/non-fast-forward|rejected/iu.test(initial.stderr)) return initial
+    const pull = await this.pull(root, signal)
+    return pull.exitCode === 0 ? this.runner.run(['push'], root, signal) : pull
+  }
+
   /** 递归扫描一个已初始化仓库，并建立仅供当前工作区使用的仓库路径清单。 */
   private async scanRepository(
     root: string,
@@ -232,6 +252,25 @@ export class GitHistoryService {
         hasMore: commits.length > request.limit,
       },
     }
+  }
+
+  /** 按 EnsoAI 的同步顺序先拉取落后提交，再推送本地领先提交。 */
+  async sync(request: SyncRequest, signal?: AbortSignal): Promise<ApiResult<SyncResult>> {
+    const workspace = await this.gate.resolve(request.path)
+    if (!workspace.ok) return workspace
+    const root = this.repositories.get(workspace.value)?.get(request.repositoryId)
+    if (root === undefined) return fail('repository-unknown', 'repository is stale; refresh the Git view')
+    const identity = await this.readIdentity(root, signal)
+    if (identity.tracking === null) return fail('internal', 'repository has no upstream branch')
+    if (identity.behind > 0) {
+      const pull = await this.pull(root, signal)
+      if (pull.exitCode !== 0) return fail('internal', (firstLine(pull.stderr) ?? 'git pull failed').slice(0, 500))
+    }
+    if (identity.ahead > 0) {
+      const push = await this.push(root, signal)
+      if (push.exitCode !== 0) return fail('internal', (firstLine(push.stderr) ?? 'git push failed').slice(0, 500))
+    }
+    return { ok: true, value: { branch: identity.branch, pulled: identity.behind, pushed: identity.ahead } }
   }
 }
 

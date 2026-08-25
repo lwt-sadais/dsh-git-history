@@ -37,6 +37,15 @@ export interface HistoryRequest {
     readonly skip: number;
     readonly limit: number;
 }
+export interface SyncRequest {
+    readonly path: string;
+    readonly repositoryId: string;
+}
+export interface SyncResult {
+    readonly branch: string | null;
+    readonly pulled: number;
+    readonly pushed: number;
+}
 export interface ApiError {
     readonly code: 'workspace-unknown' | 'not-git-repository' | 'repository-unknown' | 'invalid-request' | 'internal';
     readonly message: string;

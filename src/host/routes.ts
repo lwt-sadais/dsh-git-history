@@ -1,11 +1,12 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { isIP } from 'node:net'
 import type { Context } from '@deepseek-ai/cordis'
-import type { ApiResult, HistoryPage, HistoryRequest, RepositorySnapshot, SnapshotRequest } from '../core/types.js'
+import type { ApiResult, HistoryPage, HistoryRequest, RepositorySnapshot, SnapshotRequest, SyncRequest, SyncResult } from '../core/types.js'
 import type { GitHistoryService } from './git-service.js'
 
 const SNAPSHOT_ROUTE = '/api/dsh-git-history/snapshot'
 const HISTORY_ROUTE = '/api/dsh-git-history/log'
+const SYNC_ROUTE = '/api/dsh-git-history/sync'
 const BODY_CAP = 16 * 1024
 
 /** 仅接受来自当前 DSH 页面、回环地址且使用 JSON 的请求。 */
@@ -63,6 +64,15 @@ function historyRequestOf(value: unknown): HistoryRequest | null {
   if (path === null || repositoryId === null || !Number.isSafeInteger(skip) || !Number.isSafeInteger(limit)) return null
   if ((skip as number) < 0 || (limit as number) < 1 || (limit as number) > 100) return null
   return { path, repositoryId, skip: skip as number, limit: limit as number }
+}
+
+/** 校验仅包含工作区和已扫描仓库标识的同步请求。 */
+function syncRequestOf(value: unknown): SyncRequest | null {
+  const record = recordOf(value)
+  if (record === null || Object.keys(record).length !== 2) return null
+  const path = boundedString(record.path)
+  const repositoryId = boundedString(record.repositoryId, true)
+  return path === null || repositoryId === null ? null : { path, repositoryId }
 }
 
 /** 输出无缓存且禁止 MIME 嗅探的 JSON 响应。 */
@@ -128,5 +138,11 @@ export function registerRoutes(ctx: Context, service: GitHistoryService): () => 
     historyRequestOf,
     (request, signal) => service.history(request, signal),
   )
-  return () => { disposeHistory(); disposeSnapshot() }
+  const disposeSync = registerRoute<SyncRequest, SyncResult>(
+    ctx,
+    SYNC_ROUTE,
+    syncRequestOf,
+    (request, signal) => service.sync(request, signal),
+  )
+  return () => { disposeSync(); disposeHistory(); disposeSnapshot() }
 }

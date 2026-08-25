@@ -4,15 +4,17 @@
 
 ## 功能
 
-- 在会话中心区新增独立的 **Git** 标签，不替换 Chat、Trajectory 或工作区侧栏。
+- 在聊天输入框工具栏新增常驻的 **Git History** 入口，新建空白会话无需先发送消息即可使用。
+- 点击入口后通过弹窗显示仓库树和提交历史，不占用 Chat、Trajectory 或工作区侧栏。
 - 树状显示当前工作区和所有递归子模块。
 - 每个已初始化仓库显示名称、当前分支和 upstream：
   - `数字 ↑` 表示本地领先远程跟踪分支的提交数。
   - `数字 ↓` 表示本地落后远程跟踪分支的提交数。
 - 点击根仓库或子模块后，下方切换到对应仓库的 Git History。
 - History 显示提交标题、作者、相对时间、短 Hash、分支和标签引用，并支持分页加载。
-- 首次打开 Git 标签时先读取本地状态，再自动执行 `git fetch --prune` 更新远程跟踪引用。
+- 首次打开 Git History 弹窗时先读取本地状态，再自动执行 `git fetch --prune` 更新远程跟踪引用；入口本身不会触发网络请求。
 - 手动刷新时重新 fetch 根仓库和所有已初始化子模块；单个仓库 fetch 失败不会清空其本地数据。
+- 点击 ahead/behind 数字按钮会按 EnsoAI 的行为同步该仓库：先尝试 fast-forward pull，必要时改用 rebase，再 push。
 
 ## 安装
 
@@ -41,10 +43,10 @@ dsh plugin remove --profile desktop dsh-git-history
 
 ## 使用
 
-1. 在 DSH Desktop 中打开一个 Git 仓库工作区并进入任意会话。
-2. 点击会话中心区顶部的 **Git** 标签。
-3. 在仓库树中选择根仓库或任意已初始化子模块。
-4. 在下方查看对应仓库的提交历史；需要更多记录时点击“加载更多”。
+1. 在 DSH Desktop 中打开一个 Git 仓库工作区并进入任意会话（空白新会话也可以）。
+2. 点击聊天输入框工具栏中的 **Git History**。
+3. 在弹窗仓库树中选择根仓库或任意已初始化子模块。
+4. 在右侧查看对应仓库的提交历史；需要更多记录时点击“加载更多”。
 5. 点击“刷新并 Fetch”可重新更新远程跟踪引用和 ahead/behind 数值。
 
 没有 upstream 的仓库仍会显示分支和历史，但不会显示 ahead/behind。Detached HEAD 显示为 `detached@<短哈希>`；未初始化子模块只显示名称和“未初始化”状态。
@@ -57,7 +59,7 @@ dsh plugin remove --profile desktop dsh-git-history
 - History 只能访问服务端最近一次扫描签发的仓库标识，客户端不能提交任意文件系统路径。
 - Git 通过 DSH `subprocess` 参数数组启动，不经 Shell 拼接。
 - 设置 `GIT_TERMINAL_PROMPT=0` 且每条 Git 命令最多运行 15 秒，避免认证提示或网络请求无限等待。
-- 插件不会执行 pull、push、checkout、reset 或写入工作区；自动 fetch 只更新远程跟踪引用。
+- 插件不会执行 checkout 或 reset；仅在用户点击 ahead/behind 数字按钮后执行 pull（必要时 rebase）和 push，自动 fetch 只更新远程跟踪引用。
 - 本地 API 仅接受当前 DSH 页面发出的回环地址、同源 JSON POST 请求。
 
 ## 本地开发
@@ -70,7 +72,7 @@ pnpm run check
 pnpm pack
 ```
 
-`pnpm run check` 会依次执行 TypeScript 类型检查、Vitest 测试和 Host/Client 构建。客户端包使用 DSH Client Loader 包装，并通过 `conversation.view` 插槽注册 `git-history` 视图。
+`pnpm run check` 会依次执行 TypeScript 类型检查、Vitest 测试和 Host/Client 构建。客户端包使用 DSH Client Loader 包装，并通过 `conversation.input.left` 插槽注册 `git-history` 工具栏入口。
 
 ## 主要结构
 
@@ -83,7 +85,7 @@ src/
 ├── client/api.ts             # Client API
 ├── client/locales.ts         # 中英文文案
 ├── client/styles.css         # DSH 主题样式
-├── client/index.ts           # conversation.view 注册
+├── client/index.ts           # conversation.input.left 工具栏注册
 └── index.ts                  # Host 插件入口
 ```
 

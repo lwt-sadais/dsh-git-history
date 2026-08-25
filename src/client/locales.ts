@@ -1,7 +1,8 @@
 export const zh = {
-  tab: 'Git',
+  tab: 'Git History',
   repositories: '仓库',
   history: '提交历史',
+  close: '关闭',
   refresh: '刷新并 Fetch',
   refreshing: '正在 Fetch…',
   loading: '正在读取 Git 仓库…',
@@ -16,15 +17,18 @@ export const zh = {
   loadingMore: '正在加载…',
   ahead: '本地领先 {count} 个提交',
   behind: '本地落后 {count} 个提交',
+  sync: '与远端同步',
+  syncing: '正在同步…',
+  syncCompleted: '同步完成：拉取 {pulled} 个、推送 {pushed} 个提交',
   commits: '{count} 条提交',
 } as const
 
 export const en = {
-  tab: 'Git', repositories: 'Repositories', history: 'Commit History', refresh: 'Refresh and fetch', refreshing: 'Fetching…',
+  tab: 'Git History', repositories: 'Repositories', history: 'Commit History', close: 'Close', refresh: 'Refresh and fetch', refreshing: 'Fetching…',
   loading: 'Reading Git repositories…', loadingHistory: 'Reading commit history…', noWorkspace: 'The current session has no workspace',
   noHistory: 'No commits in this repository', uninitialized: 'Not initialized', noBranch: 'Unknown branch', noUpstream: 'No upstream branch',
   fetchFailed: 'Fetch failed', loadMore: 'Load more', loadingMore: 'Loading…', ahead: '{count} commits ahead', behind: '{count} commits behind',
-  commits: '{count} commits',
+  sync: 'Sync with remote', syncing: 'Syncing…', syncCompleted: 'Sync completed: pulled {pulled}, pushed {pushed} commits', commits: '{count} commits',
 } as const
 
 export type GitHistoryLocaleKey = keyof typeof zh

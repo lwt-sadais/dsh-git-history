@@ -1,7 +1,8 @@
 export declare const zh: {
-    readonly tab: "Git";
+    readonly tab: "Git History";
     readonly repositories: "仓库";
     readonly history: "提交历史";
+    readonly close: "关闭";
     readonly refresh: "刷新并 Fetch";
     readonly refreshing: "正在 Fetch…";
     readonly loading: "正在读取 Git 仓库…";
@@ -16,12 +17,16 @@ export declare const zh: {
     readonly loadingMore: "正在加载…";
     readonly ahead: "本地领先 {count} 个提交";
     readonly behind: "本地落后 {count} 个提交";
+    readonly sync: "与远端同步";
+    readonly syncing: "正在同步…";
+    readonly syncCompleted: "同步完成：拉取 {pulled} 个、推送 {pushed} 个提交";
     readonly commits: "{count} 条提交";
 };
 export declare const en: {
-    readonly tab: "Git";
+    readonly tab: "Git History";
     readonly repositories: "Repositories";
     readonly history: "Commit History";
+    readonly close: "Close";
     readonly refresh: "Refresh and fetch";
     readonly refreshing: "Fetching…";
     readonly loading: "Reading Git repositories…";
@@ -36,6 +41,9 @@ export declare const en: {
     readonly loadingMore: "Loading…";
     readonly ahead: "{count} commits ahead";
     readonly behind: "{count} commits behind";
+    readonly sync: "Sync with remote";
+    readonly syncing: "Syncing…";
+    readonly syncCompleted: "Sync completed: pulled {pulled}, pushed {pushed} commits";
     readonly commits: "{count} commits";
 };
 export type GitHistoryLocaleKey = keyof typeof zh;

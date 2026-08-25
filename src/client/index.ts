@@ -15,7 +15,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 export const inject = ['slots', 'locale']
 const NS = 'git-history'
 
-/** 注册 Git 视图、双语词典和随插件生命周期释放的样式。 */
+/** 注册输入框工具栏入口、双语词典和随插件生命周期释放的弹窗样式。 */
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => {
     const style = document.createElement('style')
@@ -25,11 +25,10 @@ export function apply(ctx: ClientContext): void {
     return () => style.remove()
   }, 'dsh-git-history: styles')
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-git-history: dictionaries')
-  ctx.slots.inject('conversation.view', () => ctx.slots.register({
-    name: 'conversation.view',
+  ctx.slots.inject('conversation.input.left', () => ctx.slots.register({
+    name: 'conversation.input.left',
     id: 'git-history',
-    order: 20,
-    label: () => ctx.locale.bind(NS)('tab'),
+    order: 3,
     locale: NS,
   }, GitHistoryView))
 }

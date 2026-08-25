@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { CommitEntry, RepositoryNode } from '../core/types.js'
-import { readHistory, readRepositorySnapshot } from './api.js'
+import { readHistory, readRepositorySnapshot, syncRepository } from './api.js'
 
-export type GitHistoryViewProps = PropsRuntime<'conversation.view'> & PropsLocale<'git-history'>
+export type GitHistoryViewProps = PropsRuntime<'conversation.input.left'> & PropsLocale<'git-history'>
 
 const PAGE_SIZE = 20
 
@@ -41,35 +42,51 @@ function RepositoryTree({
   selectedId,
   depth,
   onSelect,
+  onSync,
+  syncingId,
   t,
 }: {
   readonly repository: RepositoryNode
   readonly selectedId: string
   readonly depth: number
   readonly onSelect: (repository: RepositoryNode) => void
+  readonly onSync: (repository: RepositoryNode) => void
+  readonly syncingId: string | null
   readonly t: GitHistoryViewProps['t']
 }) {
   const selected = repository.id === selectedId
   return (
     <div className="dghTreeNode">
-      <button
-        type="button"
-        className={`dghRepository ${selected ? 'dghRepositoryActive' : ''}`}
-        style={{ paddingLeft: `${12 + depth * 18}px` }}
-        onClick={() => repository.initialized && onSelect(repository)}
-        disabled={!repository.initialized}
-        title={repository.path || repository.name}
-      >
-        <span className="dghTreeGuide" aria-hidden="true">{depth === 0 ? '◆' : '└'}</span>
-        <span className="dghRepositoryName">{repository.name}</span>
-        {!repository.initialized && <span className="dghMuted">{t('uninitialized')}</span>}
-        {repository.initialized && <span className="dghBranch" title={repository.tracking ?? t('noUpstream')}>
-          <span aria-hidden="true">⑂</span> {repository.branch ?? t('noBranch')}
-        </span>}
-        {repository.ahead > 0 && <span className="dghAhead" title={t('ahead', { count: repository.ahead })}>{repository.ahead} ↑</span>}
-        {repository.behind > 0 && <span className="dghBehind" title={t('behind', { count: repository.behind })}>{repository.behind} ↓</span>}
+      <div className={`dghRepository ${selected ? 'dghRepositoryActive' : ''}`}>
+        <button
+          type="button"
+          className="dghRepositorySelect"
+          style={{ paddingLeft: `${12 + depth * 18}px` }}
+          onClick={() => repository.initialized && onSelect(repository)}
+          disabled={!repository.initialized}
+          title={repository.path || repository.name}
+        >
+          <span className="dghTreeGuide" aria-hidden="true">{depth === 0 ? '◆' : '└'}</span>
+          <span className="dghRepositoryName">{repository.name}</span>
+          {!repository.initialized && <span className="dghMuted">{t('uninitialized')}</span>}
+          {repository.initialized && <span className="dghBranch" title={repository.tracking ?? t('noUpstream')}>
+            <span aria-hidden="true">⑂</span> {repository.branch ?? t('noBranch')}
+          </span>}
+        </button>
+        {(repository.ahead > 0 || repository.behind > 0) && <button
+          type="button"
+          className="dghSync"
+          disabled={syncingId !== null}
+          onClick={() => onSync(repository)}
+          title={syncingId === repository.id ? t('syncing') : t('sync')}
+        >
+          {syncingId === repository.id ? <span className="dghSpin" aria-hidden="true">↻</span> : <>
+            {repository.ahead > 0 && <span className="dghAhead" title={t('ahead', { count: repository.ahead })}>{repository.ahead} ↑</span>}
+            {repository.behind > 0 && <span className="dghBehind" title={t('behind', { count: repository.behind })}>{repository.behind} ↓</span>}
+          </>}
+        </button>}
         {repository.fetchError !== null && <span className="dghFetchError" title={repository.fetchError}>!</span>}
-      </button>
+      </div>
       {repository.children.map(child => (
         <RepositoryTree
           key={child.id}
@@ -77,6 +94,8 @@ function RepositoryTree({
           selectedId={selectedId}
           depth={depth + 1}
           onSelect={onSelect}
+          onSync={onSync}
+          syncingId={syncingId}
           t={t}
         />
       ))}
@@ -105,10 +124,11 @@ function CommitRow({ commit }: { readonly commit: CommitEntry }) {
   )
 }
 
-/** 提供当前会话工作区的仓库树和可切换分页提交历史。 */
+/** 提供常驻工具栏入口，并在按需弹窗中展示仓库树和分页提交历史。 */
 export function GitHistoryView(props: GitHistoryViewProps) {
   const { sessionId, useSessions, t } = props
   const cwd = useSessions(state => state.byId[sessionId]?.cwd)
+  const [open, setOpen] = useState(false)
   const [repository, setRepository] = useState<RepositoryNode | null>(null)
   const [selectedId, setSelectedId] = useState('')
   const [commits, setCommits] = useState<readonly CommitEntry[]>([])
@@ -117,7 +137,11 @@ export function GitHistoryView(props: GitHistoryViewProps) {
   const [refreshing, setRefreshing] = useState(false)
   const [historyLoading, setHistoryLoading] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
+  const [syncingId, setSyncingId] = useState<string | null>(null)
+  const [historyRevision, setHistoryRevision] = useState(0)
   const [error, setError] = useState<string | null>(null)
+  const [syncMessage, setSyncMessage] = useState<string | null>(null)
+  const [syncError, setSyncError] = useState<string | null>(null)
   const [historyError, setHistoryError] = useState<string | null>(null)
   const selectedRepository = useMemo(() => findRepository(repository, selectedId), [repository, selectedId])
 
@@ -140,6 +164,7 @@ export function GitHistoryView(props: GitHistoryViewProps) {
   }, [cwd])
 
   useEffect(() => {
+    if (!open) return
     setRepository(null)
     setSelectedId('')
     setCommits([])
@@ -150,10 +175,10 @@ export function GitHistoryView(props: GitHistoryViewProps) {
       if (!(cause instanceof DOMException && cause.name === 'AbortError')) setError(String(cause))
     })
     return () => controller.abort()
-  }, [cwd, loadSnapshot])
+  }, [cwd, loadSnapshot, open])
 
   useEffect(() => {
-    if (cwd === undefined || cwd === '' || selectedRepository === null || !selectedRepository.initialized) return
+    if (!open || cwd === undefined || cwd === '' || selectedRepository === null || !selectedRepository.initialized) return
     const controller = new AbortController()
     setHistoryLoading(true)
     setHistoryError(null)
@@ -171,7 +196,32 @@ export function GitHistoryView(props: GitHistoryViewProps) {
       setHistoryLoading(false)
     })
     return () => controller.abort()
-  }, [cwd, selectedRepository?.id])
+  }, [cwd, historyRevision, open, selectedRepository?.id])
+
+  useEffect(() => {
+    if (!open) return
+    const close = (event: KeyboardEvent) => { if (event.key === 'Escape') setOpen(false) }
+    document.addEventListener('keydown', close)
+    return () => document.removeEventListener('keydown', close)
+  }, [open])
+
+  /** 同步指定仓库，并在成功后刷新仓库计数和当前提交历史。 */
+  const sync = useCallback(async (item: RepositoryNode) => {
+    if (cwd === undefined || cwd === '' || syncingId !== null) return
+    setSelectedId(item.id)
+    setSyncingId(item.id)
+    setSyncMessage(null)
+    setSyncError(null)
+    const result = await syncRepository({ path: cwd, repositoryId: item.id })
+    if (result.ok) {
+      setSyncMessage(t('syncCompleted', { pulled: result.value.pulled, pushed: result.value.pushed }))
+      await loadSnapshot(false)
+      setHistoryRevision(current => current + 1)
+    } else {
+      setSyncError(result.error.message)
+    }
+    setSyncingId(null)
+  }, [cwd, loadSnapshot, syncingId, t])
 
   /** 追加下一页历史，同时避免并发重复加载。 */
   const loadMore = useCallback(async () => {
@@ -192,39 +242,57 @@ export function GitHistoryView(props: GitHistoryViewProps) {
     setLoadingMore(false)
   }, [commits.length, cwd, hasMore, loadingMore, selectedRepository])
 
-  if (cwd === undefined || cwd === '') return <div className="dghState">{t('noWorkspace')}</div>
-
   return (
-    <section className="dghRoot">
-      <header className="dghHeader">
-        <div>
-          <h2>{t('repositories')}</h2>
-          {repository !== null && <span>{t('commits', { count: commits.length })}</span>}
-        </div>
-        <button type="button" className="dghRefresh" disabled={refreshing || loading} onClick={() => void loadSnapshot(true)}>
-          <span className={refreshing ? 'dghSpin' : ''} aria-hidden="true">↻</span>
-          {refreshing ? t('refreshing') : t('refresh')}
-        </button>
-      </header>
+    <div className="dghDock">
+      <button type="button" className="dghLauncher" onClick={() => setOpen(true)} aria-label={t('tab')} title={t('tab')}>
+        <span className="dghLauncherIcon" aria-hidden="true">⑂</span>
+        <span>{t('tab')}</span>
+      </button>
+      {open && createPortal(
+        <div className="dghOverlay" role="dialog" aria-modal="true" aria-label={t('history')}>
+          <button className="dghMask" type="button" onClick={() => setOpen(false)} aria-label={t('close')} />
+          <section className="dghPanel">
+            <header className="dghHeader">
+              <div>
+                <h2>{t('history')}</h2>
+                {repository !== null && <span>{t('commits', { count: commits.length })}</span>}
+              </div>
+              <div className="dghHeaderActions">
+                <button type="button" className="dghRefresh" disabled={refreshing || loading || cwd === undefined || cwd === ''} onClick={() => void loadSnapshot(true)}>
+                  <span className={refreshing ? 'dghSpin' : ''} aria-hidden="true">↻</span>
+                  {refreshing ? t('refreshing') : t('refresh')}
+                </button>
+                <button type="button" className="dghClose" onClick={() => setOpen(false)} aria-label={t('close')}>×</button>
+              </div>
+            </header>
 
-      {loading && repository === null ? <div className="dghState">{t('loading')}</div> : error !== null ? <div className="dghState dghError">{error}</div> : repository !== null && <>
-        <div className="dghRepositories">
-          <RepositoryTree repository={repository} selectedId={selectedId} depth={0} onSelect={item => setSelectedId(item.id)} t={t} />
-        </div>
-        <div className="dghHistoryHeader">
-          <h3>{t('history')}</h3>
-          <span>{selectedRepository?.name}</span>
-          {selectedRepository?.fetchError !== null && selectedRepository?.fetchError !== undefined && <span className="dghHistoryWarning" title={selectedRepository.fetchError}>{t('fetchFailed')}</span>}
-        </div>
-        <div className="dghHistory">
-          {historyLoading ? <div className="dghState">{t('loadingHistory')}</div> : historyError !== null ? <div className="dghState dghError">{historyError}</div> : commits.length === 0 ? <div className="dghState">{t('noHistory')}</div> : <>
-            {commits.map(commit => <CommitRow key={commit.hash} commit={commit} />)}
-            {hasMore && <button type="button" className="dghLoadMore" disabled={loadingMore} onClick={() => void loadMore()}>
-              {loadingMore ? t('loadingMore') : t('loadMore')}
-            </button>}
-          </>}
-        </div>
-      </>}
-    </section>
+            {cwd === undefined || cwd === '' ? <div className="dghState">{t('noWorkspace')}</div> : loading && repository === null ? <div className="dghState">{t('loading')}</div> : error !== null ? <div className="dghState dghError">{error}</div> : repository !== null && <div className="dghContent">
+              <aside className="dghRepositories">
+                <div className="dghRepositoriesTitle">{t('repositories')}</div>
+                <RepositoryTree repository={repository} selectedId={selectedId} depth={0} onSelect={item => setSelectedId(item.id)} onSync={item => void sync(item)} syncingId={syncingId} t={t} />
+              </aside>
+              <main className="dghMain">
+                {syncMessage !== null && <div className="dghSyncMessage">{syncMessage}</div>}
+                {syncError !== null && <div className="dghSyncMessage dghSyncMessageError">{syncError}</div>}
+                <div className="dghHistoryHeader">
+                  <h3>{t('history')}</h3>
+                  <span>{selectedRepository?.name}</span>
+                  {selectedRepository?.fetchError !== null && selectedRepository?.fetchError !== undefined && <span className="dghHistoryWarning" title={selectedRepository.fetchError}>{t('fetchFailed')}</span>}
+                </div>
+                <div className="dghHistory">
+                  {historyLoading ? <div className="dghState">{t('loadingHistory')}</div> : historyError !== null ? <div className="dghState dghError">{historyError}</div> : commits.length === 0 ? <div className="dghState">{t('noHistory')}</div> : <>
+                    {commits.map(commit => <CommitRow key={commit.hash} commit={commit} />)}
+                    {hasMore && <button type="button" className="dghLoadMore" disabled={loadingMore} onClick={() => void loadMore()}>
+                      {loadingMore ? t('loadingMore') : t('loadMore')}
+                    </button>}
+                  </>}
+                </div>
+              </main>
+            </div>}
+          </section>
+        </div>,
+        document.body,
+      )}
+    </div>
   )
 }

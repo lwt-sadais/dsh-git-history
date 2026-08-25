@@ -1,4 +1,4 @@
-import type { ApiResult, HistoryPage, HistoryRequest, RepositorySnapshot } from '../core/types.js'
+import type { ApiResult, HistoryPage, HistoryRequest, RepositorySnapshot, SyncRequest, SyncResult } from '../core/types.js'
 
 const FALLBACK: ApiResult<never> = {
   ok: false,
@@ -31,4 +31,9 @@ export function readRepositorySnapshot(path: string, fetchRemote: boolean, signa
 /** 分页读取指定仓库的提交历史。 */
 export function readHistory(request: HistoryRequest, signal?: AbortSignal): Promise<ApiResult<HistoryPage>> {
   return post('/api/dsh-git-history/log', request, signal)
+}
+
+/** 按远端跟踪状态先 pull 后 push 同步指定仓库。 */
+export function syncRepository(request: SyncRequest, signal?: AbortSignal): Promise<ApiResult<SyncResult>> {
+  return post('/api/dsh-git-history/sync', request, signal)
 }

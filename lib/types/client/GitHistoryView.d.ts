@@ -1,4 +1,4 @@
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots';
-export type GitHistoryViewProps = PropsRuntime<'conversation.view'> & PropsLocale<'git-history'>;
-/** 提供当前会话工作区的仓库树和可切换分页提交历史。 */
+export type GitHistoryViewProps = PropsRuntime<'conversation.input.left'> & PropsLocale<'git-history'>;
+/** 提供常驻工具栏入口，并在按需弹窗中展示仓库树和分页提交历史。 */
 export declare function GitHistoryView(props: GitHistoryViewProps): import("react").JSX.Element;
