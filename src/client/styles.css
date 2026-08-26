@@ -156,8 +156,9 @@
 .dghDiffDelete, .dghDiffModifyDelete { background: #d55b5b1a; }
 .dghDiffInsert, .dghDiffModifyInsert { background: #2b9b621a; }
 .dghDiffEmpty { background: var(--dsw-alias-interactive-bg-hover); }
-.dghDiffIndicator { position: relative; background: var(--dsw-alias-bg-base); border-left: 1px solid var(--dsw-alias-border-l2); }
-.dghDiffIndicator span { position: absolute; display: block; width: 100%; min-height: 2px; }
+.dghDiffIndicator { position: relative; cursor: pointer; background: var(--dsw-alias-bg-base); border-left: 1px solid var(--dsw-alias-border-l2); }
+.dghDiffMarker { position: absolute; display: block; width: 100%; min-height: 3px; cursor: pointer; border: 0; padding: 0; }
+.dghDiffMarker:hover, .dghDiffMarker:focus-visible { z-index: 1; min-height: 6px; outline: 1px solid var(--dsw-alias-label-primary); }
 .dghMarkerDelete { background: #d55b5b; }
 .dghMarkerInsert { background: #2b9b62; }
 

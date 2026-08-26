@@ -35,6 +35,7 @@ export declare const zh: {
     readonly statusAdded: "A";
     readonly statusDeleted: "D";
     readonly statusRenamed: "R";
+    readonly locateChange: "定位到第 {line} 行改动";
 };
 export declare const en: {
     readonly tab: "Git History";
@@ -73,5 +74,6 @@ export declare const en: {
     readonly statusAdded: "A";
     readonly statusDeleted: "D";
     readonly statusRenamed: "R";
+    readonly locateChange: "Locate change at row {line}";
 };
 export type GitHistoryLocaleKey = keyof typeof zh;

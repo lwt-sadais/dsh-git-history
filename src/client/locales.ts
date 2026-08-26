@@ -35,6 +35,7 @@ export const zh = {
   statusAdded: 'A',
   statusDeleted: 'D',
   statusRenamed: 'R',
+  locateChange: '定位到第 {line} 行改动',
 } as const
 
 export const en = {
@@ -45,7 +46,7 @@ export const en = {
   sync: 'Sync with remote', syncing: 'Syncing…', syncCompleted: 'Sync completed: pulled {pulled}, pushed {pushed} commits', commits: '{count} commits',
   commitChanges: 'Commit changes', changedFiles: '{count} changed files', loadingChanges: 'Loading commit changes…', noChanges: 'No file changes in this commit',
   selectFile: 'Select a file to view changes', firstParent: 'Changes are compared with the parent; merge commits use the first parent', before: 'Before', after: 'After',
-  binary: 'Binary files cannot be compared as text', truncated: 'Large file: showing the first 2 MiB', statusModified: 'M', statusAdded: 'A', statusDeleted: 'D', statusRenamed: 'R',
+  binary: 'Binary files cannot be compared as text', truncated: 'Large file: showing the first 2 MiB', statusModified: 'M', statusAdded: 'A', statusDeleted: 'D', statusRenamed: 'R', locateChange: 'Locate change at row {line}',
 } as const
 
 export type GitHistoryLocaleKey = keyof typeof zh

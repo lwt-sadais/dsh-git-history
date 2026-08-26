@@ -200,6 +200,12 @@ function CommitDetailDialog({ commit, detail, activeFileId, activeFile, loading,
     target.scrollLeft = source.scrollLeft
     requestAnimationFrame(() => { syncing.current = false })
   }
+  /** 将指定差异行平滑滚动到两侧视口中央。 */
+  const locate = (row: number) => {
+    const top = row * DIFF_ROW_HEIGHT
+    leftRef.current?.scrollTo({ top: Math.max(0, top - (leftRef.current.clientHeight / 2)), behavior: 'smooth' })
+    rightRef.current?.scrollTo({ top: Math.max(0, top - (rightRef.current.clientHeight / 2)), behavior: 'smooth' })
+  }
   useEffect(() => {
     if (leftRef.current) { leftRef.current.scrollTop = 0; leftRef.current.scrollLeft = 0 }
     if (rightRef.current) { rightRef.current.scrollTop = 0; rightRef.current.scrollLeft = 0 }
@@ -229,7 +235,16 @@ function CommitDetailDialog({ commit, detail, activeFileId, activeFile, loading,
               <div className="dghDiffViewport">
                 <DiffPane file={activeFile} side="before" paneRef={leftRef} onScroll={() => sync(leftRef.current, rightRef.current)} />
                 <DiffPane file={activeFile} side="after" paneRef={rightRef} onScroll={() => sync(rightRef.current, leftRef.current)} />
-                <div className="dghDiffIndicator" aria-hidden="true">{activeFile.markers.map((marker, index) => <span key={`${marker.row}-${marker.kind}-${index}`} className={marker.kind === 'delete' ? 'dghMarkerDelete' : 'dghMarkerInsert'} style={{ top: `${(marker.row / Math.max(1, activeFile.rows.length)) * 100}%` }} />)}</div>
+                <div className="dghDiffIndicator" onClick={event => locate(Math.round((event.nativeEvent.offsetY / event.currentTarget.clientHeight) * Math.max(0, activeFile.rows.length - 1)))}>
+                  {activeFile.markers.map((marker, index) => <button
+                    key={`${marker.row}-${marker.kind}-${index}`}
+                    type="button"
+                    className={`dghDiffMarker ${marker.kind === 'delete' ? 'dghMarkerDelete' : 'dghMarkerInsert'}`}
+                    style={{ top: `${(marker.row / Math.max(1, activeFile.rows.length)) * 100}%` }}
+                    onClick={event => { event.stopPropagation(); locate(marker.row) }}
+                    aria-label={t('locateChange', { line: marker.row + 1 })}
+                  />)}
+                </div>
               </div>
             </>}
           </main>
