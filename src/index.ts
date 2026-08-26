@@ -18,4 +18,4 @@ export function apply(ctx: Context): void {
 }
 
 export type * from './core/types.js'
-export { GitHistoryService, parseAheadBehind, parseHistory, parseSubmodulePaths } from './host/git-service.js'
+export { alignDiff, GitHistoryService, parseAheadBehind, parseCommitFiles, parseHistory, parseSubmodulePaths } from './host/git-service.js'

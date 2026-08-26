@@ -21,6 +21,20 @@ export const zh = {
   syncing: '正在同步…',
   syncCompleted: '同步完成：拉取 {pulled} 个、推送 {pushed} 个提交',
   commits: '{count} 条提交',
+  commitChanges: '提交改动',
+  changedFiles: '{count} 个改动文件',
+  loadingChanges: '正在读取提交改动…',
+  noChanges: '该提交没有文件改动',
+  selectFile: '请选择文件查看改动',
+  firstParent: '改动相对父提交比较；合并提交使用第一父提交',
+  before: '修改前',
+  after: '修改后',
+  binary: '二进制文件无法作为文本比较',
+  truncated: '文件较大，仅展示前 2 MiB',
+  statusModified: 'M',
+  statusAdded: 'A',
+  statusDeleted: 'D',
+  statusRenamed: 'R',
 } as const
 
 export const en = {
@@ -29,6 +43,9 @@ export const en = {
   noHistory: 'No commits in this repository', uninitialized: 'Not initialized', noBranch: 'Unknown branch', noUpstream: 'No upstream branch',
   fetchFailed: 'Fetch failed', loadMore: 'Load more', loadingMore: 'Loading…', ahead: '{count} commits ahead', behind: '{count} commits behind',
   sync: 'Sync with remote', syncing: 'Syncing…', syncCompleted: 'Sync completed: pulled {pulled}, pushed {pushed} commits', commits: '{count} commits',
+  commitChanges: 'Commit changes', changedFiles: '{count} changed files', loadingChanges: 'Loading commit changes…', noChanges: 'No file changes in this commit',
+  selectFile: 'Select a file to view changes', firstParent: 'Changes are compared with the parent; merge commits use the first parent', before: 'Before', after: 'After',
+  binary: 'Binary files cannot be compared as text', truncated: 'Large file: showing the first 2 MiB', statusModified: 'M', statusAdded: 'A', statusDeleted: 'D', statusRenamed: 'R',
 } as const
 
 export type GitHistoryLocaleKey = keyof typeof zh

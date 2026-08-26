@@ -80,5 +80,15 @@
     "type": "git",
     "url": "https://github.com/lwt-sadais/dsh-git-history.git"
   },
-  "keywords": ["deepseek", "dsh", "plugin", "git", "history", "submodule"]
+  "keywords": [
+    "deepseek",
+    "dsh",
+    "plugin",
+    "git",
+    "history",
+    "submodule"
+  ],
+  "dependencies": {
+    "diff": "^8.0.4"
+  }
 }

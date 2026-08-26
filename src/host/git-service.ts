@@ -1,9 +1,19 @@
+import { randomUUID } from 'node:crypto'
 import { realpath } from 'node:fs/promises'
 import { basename, isAbsolute, relative, resolve, sep } from 'node:path'
+import { diffLines } from 'diff'
 import type {
   ApiError,
   ApiResult,
+  ChangeMarker,
+  CommitDetail,
+  CommitDetailRequest,
   CommitEntry,
+  CommitFile,
+  CommitFileRequest,
+  CommitFileSummary,
+  DiffLine,
+  DiffRow,
   HistoryPage,
   HistoryRequest,
   RepositoryNode,
@@ -18,6 +28,24 @@ const MAX_ERROR_BYTES = 256 * 1024
 const COMMAND_TIMEOUT_MS = 15_000
 const FIELD_SEPARATOR = '\u001f'
 const RECORD_SEPARATOR = '\u001e'
+const MAX_FILE_BYTES = 2 * 1024 * 1024
+const MAX_DIFF_BYTES = 16 * 1024 * 1024
+const MAX_MANIFESTS = 8
+const MANIFEST_TTL_MS = 5 * 60_000
+const EMPTY_LINE: DiffLine = { kind: 'empty', text: '', lineNumber: null }
+
+interface CommitManifestEntry {
+  readonly summary: CommitFileSummary
+  readonly repositoryRoot: string
+  readonly commitHash: string
+  readonly parentHash: string | null
+}
+
+interface StoredCommitManifest {
+  readonly workspace: string
+  readonly expiresAt: number
+  readonly files: ReadonlyMap<string, CommitManifestEntry>
+}
 
 export interface GitRunResult {
   readonly exitCode: number | null
@@ -73,6 +101,88 @@ function childId(parentId: string, childPath: string): string {
   return parentId === '' ? childPath : `${parentId}/${childPath}`
 }
 
+/** 将文本拆为稳定的逻辑行，同时忽略末尾换行产生的空记录。 */
+function splitLines(content: string): string[] {
+  if (content === '') return []
+  const lines = content.replace(/\r\n/gu, '\n').split('\n')
+  if (lines.at(-1) === '') lines.pop()
+  return lines
+}
+
+/** 构造带行号的差异行。 */
+function diffLine(kind: DiffLine['kind'], text: string, lineNumber: number, partnerKind?: 'delete' | 'insert'): DiffLine {
+  return { kind, text, lineNumber, ...(partnerKind === undefined ? {} : { partnerKind }) }
+}
+
+/** 将修改前后文本对齐为双栏行，并生成可定位的变更标记。 */
+export function alignDiff(before: string, after: string): { rows: readonly DiffRow[], markers: readonly ChangeMarker[] } {
+  const chunks = diffLines(before, after, { newlineIsToken: false, stripTrailingCr: true })
+  const rows: DiffRow[] = []
+  const markers: ChangeMarker[] = []
+  let beforeLine = 1
+  let afterLine = 1
+  let index = 0
+  for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
+    const chunk = chunks[chunkIndex]!
+    if (chunk.removed && chunks[chunkIndex + 1]?.added) {
+      const inserted = chunks[chunkIndex + 1]!
+      const leftLines = splitLines(chunk.value)
+      const rightLines = splitLines(inserted.value)
+      for (let offset = 0; offset < Math.max(leftLines.length, rightLines.length); offset += 1) {
+        const leftText = leftLines[offset]
+        const rightText = rightLines[offset]
+        const left = leftText === undefined ? EMPTY_LINE : diffLine('modify', leftText, beforeLine++, 'delete')
+        const right = rightText === undefined ? EMPTY_LINE : diffLine('modify', rightText, afterLine++, 'insert')
+        rows.push({ index, left, right, changed: true })
+        if (leftText !== undefined) markers.push({ row: index, kind: 'delete' })
+        if (rightText !== undefined) markers.push({ row: index, kind: 'insert' })
+        index += 1
+      }
+      chunkIndex += 1
+      continue
+    }
+    for (const value of splitLines(chunk.value)) {
+      if (chunk.removed) {
+        rows.push({ index, left: diffLine('delete', value, beforeLine++), right: EMPTY_LINE, changed: true })
+        markers.push({ row: index, kind: 'delete' })
+      } else if (chunk.added) {
+        rows.push({ index, left: EMPTY_LINE, right: diffLine('insert', value, afterLine++), changed: true })
+        markers.push({ row: index, kind: 'insert' })
+      } else {
+        rows.push({ index, left: diffLine('equal', value, beforeLine++), right: diffLine('equal', value, afterLine++), changed: false })
+      }
+      index += 1
+    }
+  }
+  return { rows, markers }
+}
+
+/** 解析 diff-tree 的 NUL 分隔状态记录，并为文件签发不可猜测标识。 */
+export function parseCommitFiles(stdout: string): CommitFileSummary[] {
+  const fields = stdout.split('\0')
+  const files: CommitFileSummary[] = []
+  for (let index = 0; index < fields.length;) {
+    const status = fields[index++]
+    if (!status) continue
+    const code = status[0]
+    if (code === 'R' || code === 'C') {
+      const oldPath = fields[index++]
+      const path = fields[index++]
+      if (oldPath && path) files.push({ id: randomUUID(), path, oldPath, status: 'renamed' })
+      continue
+    }
+    const path = fields[index++]
+    if (!path) continue
+    files.push({
+      id: randomUUID(),
+      path,
+      oldPath: null,
+      status: code === 'A' ? 'added' : code === 'D' ? 'deleted' : 'modified',
+    })
+  }
+  return files
+}
+
 /** 将 rev-list 的左右计数转换为 ahead 和 behind。 */
 export function parseAheadBehind(stdout: string): { ahead: number, behind: number } {
   const [aheadValue, behindValue] = stdout.trim().split(/\s+/u)
@@ -103,6 +213,7 @@ export function parseHistory(stdout: string): CommitEntry[] {
 
 export class GitHistoryService {
   private readonly repositories = new Map<string, ReadonlyMap<string, string>>()
+  private readonly commitManifests = new Map<string, StoredCommitManifest>()
 
   /** 创建服务并注入受控 Git 执行器和已注册工作区校验器。 */
   constructor(private readonly runner: GitRunner, private readonly gate: WorkspaceGate) {}
@@ -252,6 +363,71 @@ export class GitHistoryService {
         hasMore: commits.length > request.limit,
       },
     }
+  }
+
+  /** 验证提交属于已扫描仓库，并签发短期文件清单供后续按需读取。 */
+  async commit(request: CommitDetailRequest, signal?: AbortSignal): Promise<ApiResult<CommitDetail>> {
+    const workspace = await this.gate.resolve(request.path)
+    if (!workspace.ok) return workspace
+    const root = this.repositories.get(workspace.value)?.get(request.repositoryId)
+    if (root === undefined) return fail('repository-unknown', 'repository is stale; refresh the Git view')
+    const verified = await this.runner.run(['cat-file', '-e', `${request.commitHash}^{commit}`], root, signal)
+    if (verified.exitCode !== 0) return fail('commit-unknown', 'commit is unavailable in this repository')
+    const parent = await this.runner.run(['rev-parse', '--verify', `${request.commitHash}^1`], root, signal)
+    const parentHash = parent.exitCode === 0 ? firstLine(parent.stdout) : null
+    const tree = await this.runner.run(parentHash === null
+      ? ['diff-tree', '--root', '--no-commit-id', '--name-status', '-r', '-z', '-M', request.commitHash]
+      : ['diff-tree', '--no-commit-id', '--name-status', '-r', '-z', '-M', parentHash, request.commitHash], root, signal)
+    if (tree.exitCode !== 0) return fail('internal', 'unable to read commit changes')
+    const files = parseCommitFiles(tree.stdout)
+    const entries = new Map(files.map(summary => [summary.id, { summary, repositoryRoot: root, commitHash: request.commitHash, parentHash }]))
+    const manifestId = randomUUID()
+    const now = Date.now()
+    for (const [id, manifest] of this.commitManifests) if (manifest.expiresAt <= now) this.commitManifests.delete(id)
+    while (this.commitManifests.size >= MAX_MANIFESTS) this.commitManifests.delete(this.commitManifests.keys().next().value!)
+    this.commitManifests.set(manifestId, { workspace: workspace.value, expiresAt: now + MANIFEST_TTL_MS, files: entries })
+    return { ok: true, value: { manifestId, parentHash, files } }
+  }
+
+  /** 解析服务端签发的提交文件引用，拒绝过期清单和任意客户端路径。 */
+  private async commitManifestEntry(request: CommitFileRequest): Promise<ApiResult<CommitManifestEntry>> {
+    const workspace = await this.gate.resolve(request.path)
+    if (!workspace.ok) return workspace
+    const manifest = this.commitManifests.get(request.manifestId)
+    if (manifest === undefined || manifest.expiresAt <= Date.now() || manifest.workspace !== workspace.value) {
+      this.commitManifests.delete(request.manifestId)
+      return fail('manifest-stale', 'commit detail has expired; reopen the commit')
+    }
+    const entry = manifest.files.get(request.fileId)
+    return entry === undefined ? fail('file-unknown', 'file is not present in this commit') : { ok: true, value: entry }
+  }
+
+  /** 按需读取提交文件两侧内容，并返回适合双栏显示的有界文本差异。 */
+  async commitFile(request: CommitFileRequest, signal?: AbortSignal): Promise<ApiResult<CommitFile>> {
+    const resolved = await this.commitManifestEntry(request)
+    if (!resolved.ok) return resolved
+    const { summary, repositoryRoot, commitHash, parentHash } = resolved.value
+    let before = ''
+    let after = ''
+    if (summary.status !== 'added' && parentHash !== null) {
+      const previous = await this.runner.run(['show', `${parentHash}:${summary.oldPath ?? summary.path}`], repositoryRoot, signal)
+      if (previous.exitCode !== 0) return fail('manifest-stale', 'commit baseline is unavailable; reopen the commit')
+      before = previous.stdout
+    }
+    if (summary.status !== 'deleted') {
+      const current = await this.runner.run(['show', `${commitHash}:${summary.path}`], repositoryRoot, signal)
+      if (current.exitCode !== 0) return fail('manifest-stale', 'commit file is unavailable; reopen the commit')
+      after = current.stdout
+    }
+    if (Buffer.byteLength(before) + Buffer.byteLength(after) > MAX_DIFF_BYTES) return fail('too-large', 'commit file diff exceeds the review limit')
+    const binary = before.includes('\0') || after.includes('\0')
+    const truncated = Buffer.byteLength(before) > MAX_FILE_BYTES || Buffer.byteLength(after) > MAX_FILE_BYTES
+    if (truncated) {
+      before = Buffer.from(before).subarray(0, MAX_FILE_BYTES).toString('utf8')
+      after = Buffer.from(after).subarray(0, MAX_FILE_BYTES).toString('utf8')
+    }
+    const aligned = binary ? { rows: [], markers: [] } : alignDiff(before, after)
+    return { ok: true, value: { ...summary, binary, truncated, rows: aligned.rows, markers: aligned.markers } }
   }
 
   /** 按 EnsoAI 的同步顺序先拉取落后提交，再推送本地领先提交。 */

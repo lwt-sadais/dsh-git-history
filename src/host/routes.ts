@@ -1,11 +1,13 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { isIP } from 'node:net'
 import type { Context } from '@deepseek-ai/cordis'
-import type { ApiResult, HistoryPage, HistoryRequest, RepositorySnapshot, SnapshotRequest, SyncRequest, SyncResult } from '../core/types.js'
+import type { ApiResult, CommitDetail, CommitDetailRequest, CommitFile, CommitFileRequest, HistoryPage, HistoryRequest, RepositorySnapshot, SnapshotRequest, SyncRequest, SyncResult } from '../core/types.js'
 import type { GitHistoryService } from './git-service.js'
 
 const SNAPSHOT_ROUTE = '/api/dsh-git-history/snapshot'
 const HISTORY_ROUTE = '/api/dsh-git-history/log'
+const COMMIT_ROUTE = '/api/dsh-git-history/commit'
+const COMMIT_FILE_ROUTE = '/api/dsh-git-history/commit-file'
 const SYNC_ROUTE = '/api/dsh-git-history/sync'
 const BODY_CAP = 16 * 1024
 
@@ -64,6 +66,27 @@ function historyRequestOf(value: unknown): HistoryRequest | null {
   if (path === null || repositoryId === null || !Number.isSafeInteger(skip) || !Number.isSafeInteger(limit)) return null
   if ((skip as number) < 0 || (limit as number) < 1 || (limit as number) > 100) return null
   return { path, repositoryId, skip: skip as number, limit: limit as number }
+}
+
+/** 校验提交详情请求，并限制对象 ID 为 Git 支持的十六进制长度。 */
+function commitRequestOf(value: unknown): CommitDetailRequest | null {
+  const record = recordOf(value)
+  if (record === null || Object.keys(record).length !== 3) return null
+  const path = boundedString(record.path)
+  const repositoryId = boundedString(record.repositoryId, true)
+  const commitHash = boundedString(record.commitHash)
+  return path === null || repositoryId === null || commitHash === null || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu.test(commitHash)
+    ? null : { path, repositoryId, commitHash }
+}
+
+/** 校验服务端签发的提交文件清单引用。 */
+function commitFileRequestOf(value: unknown): CommitFileRequest | null {
+  const record = recordOf(value)
+  if (record === null || Object.keys(record).length !== 3) return null
+  const path = boundedString(record.path)
+  const manifestId = boundedString(record.manifestId)
+  const fileId = boundedString(record.fileId)
+  return path === null || manifestId === null || fileId === null ? null : { path, manifestId, fileId }
 }
 
 /** 校验仅包含工作区和已扫描仓库标识的同步请求。 */
@@ -138,11 +161,23 @@ export function registerRoutes(ctx: Context, service: GitHistoryService): () => 
     historyRequestOf,
     (request, signal) => service.history(request, signal),
   )
+  const disposeCommit = registerRoute<CommitDetailRequest, CommitDetail>(
+    ctx,
+    COMMIT_ROUTE,
+    commitRequestOf,
+    (request, signal) => service.commit(request, signal),
+  )
+  const disposeCommitFile = registerRoute<CommitFileRequest, CommitFile>(
+    ctx,
+    COMMIT_FILE_ROUTE,
+    commitFileRequestOf,
+    (request, signal) => service.commitFile(request, signal),
+  )
   const disposeSync = registerRoute<SyncRequest, SyncResult>(
     ctx,
     SYNC_ROUTE,
     syncRequestOf,
     (request, signal) => service.sync(request, signal),
   )
-  return () => { disposeSync(); disposeHistory(); disposeSnapshot() }
+  return () => { disposeSync(); disposeCommitFile(); disposeCommit(); disposeHistory(); disposeSnapshot() }
 }
