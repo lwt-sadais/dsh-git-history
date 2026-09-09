@@ -9,6 +9,8 @@ interface RepositoryNode {
   readonly tracking: string | null;
   readonly ahead: number;
   readonly behind: number;
+  /** 本地未提交变更文件数，含未跟踪文件；同一文件暂存与未暂存改动只计 1 次。 */
+  readonly changes: number;
   readonly fetchError: string | null;
   readonly children: readonly RepositoryNode[];
 }
@@ -139,7 +141,7 @@ declare class GitHistoryService {
   private readonly commitManifests;
   /** 创建服务并注入受控 Git 执行器和已注册工作区校验器。 */
   constructor(runner: GitRunner, gate: WorkspaceGate);
-  /** 探测仓库当前分支、跟踪分支和同步计数。 */
+  /** 探测仓库当前分支、跟踪分支、同步计数和本地未提交变更数。 */
   private readIdentity;
   /** 在明确请求时更新远程跟踪引用；失败仅记录在对应仓库节点上。 */
   private fetch;

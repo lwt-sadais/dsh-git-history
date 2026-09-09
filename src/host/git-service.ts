@@ -192,6 +192,11 @@ export function parseAheadBehind(stdout: string): { ahead: number, behind: numbe
   }
 }
 
+/** 统计 status --porcelain=v2 行式输出中的变更条目数；`#` 表头与 `!` 忽略项不计，重命名条目单行只计 1 次。 */
+export function parseChangeCount(stdout: string): number {
+  return stdout.split(/\r?\n/u).filter(line => /^[12u?] /u.test(line)).length
+}
+
 /** 解析使用不可见分隔符输出的 Git 日志，避免提交文本中的常见字符破坏字段。 */
 export function parseHistory(stdout: string): CommitEntry[] {
   return stdout.split(RECORD_SEPARATOR).flatMap(record => {
@@ -218,7 +223,7 @@ export class GitHistoryService {
   /** 创建服务并注入受控 Git 执行器和已注册工作区校验器。 */
   constructor(private readonly runner: GitRunner, private readonly gate: WorkspaceGate) {}
 
-  /** 探测仓库当前分支、跟踪分支和同步计数。 */
+  /** 探测仓库当前分支、跟踪分支、同步计数和本地未提交变更数。 */
   private async readIdentity(root: string, signal?: AbortSignal): Promise<Omit<RepositoryNode, 'id' | 'name' | 'path' | 'initialized' | 'fetchError' | 'children'>> {
     const branchResult = await this.runner.run(['symbolic-ref', '--quiet', '--short', 'HEAD'], root, signal)
     let branch = branchResult.exitCode === 0 ? firstLine(branchResult.stdout) : null
@@ -229,10 +234,12 @@ export class GitHistoryService {
     }
     const upstreamResult = await this.runner.run(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'], root, signal)
     const tracking = upstreamResult.exitCode === 0 ? firstLine(upstreamResult.stdout) : null
-    if (tracking === null) return { branch, tracking: null, ahead: 0, behind: 0 }
+    const statusResult = await this.runner.run(['status', '--porcelain=v2', '--untracked-files=all'], root, signal)
+    const changes = statusResult.exitCode === 0 ? parseChangeCount(statusResult.stdout) : 0
+    if (tracking === null) return { branch, tracking: null, ahead: 0, behind: 0, changes }
     const countResult = await this.runner.run(['rev-list', '--left-right', '--count', 'HEAD...@{upstream}'], root, signal)
     const counts = countResult.exitCode === 0 ? parseAheadBehind(countResult.stdout) : { ahead: 0, behind: 0 }
-    return { branch, tracking, ...counts }
+    return { branch, tracking, ...counts, changes }
   }
 
   /** 在明确请求时更新远程跟踪引用；失败仅记录在对应仓库节点上。 */
@@ -304,6 +311,7 @@ export class GitHistoryService {
           tracking: null,
           ahead: 0,
           behind: 0,
+          changes: 0,
           fetchError: null,
           children: [],
         })

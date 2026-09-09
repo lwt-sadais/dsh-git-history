@@ -1,6 +1,6 @@
 import { realpath } from 'node:fs/promises'
 import { describe, expect, it } from 'vitest'
-import { alignDiff, GitHistoryService, parseAheadBehind, parseCommitFiles, parseHistory, parseSubmodulePaths } from '../src/host/git-service.js'
+import { alignDiff, GitHistoryService, parseAheadBehind, parseChangeCount, parseCommitFiles, parseHistory, parseSubmodulePaths } from '../src/host/git-service.js'
 
 /** 构造与宿主 git log 格式一致的一条测试记录。 */
 function historyRecord(fields: readonly string[]): string {
@@ -8,7 +8,7 @@ function historyRecord(fields: readonly string[]): string {
 }
 
 /** 构造按命令返回结果的受控 Git 执行器，并记录实际执行顺序。 */
-function commandRunner(root: string, ahead: number, behind: number) {
+function commandRunner(root: string, ahead: number, behind: number, statusStdout = '') {
   const calls: string[][] = []
   return {
     calls,
@@ -20,6 +20,7 @@ function commandRunner(root: string, ahead: number, behind: number) {
         if (command === 'symbolic-ref --quiet --short HEAD') return { exitCode: 0, stdout: 'main\n', stderr: '' }
         if (command === 'rev-parse --abbrev-ref --symbolic-full-name @{upstream}') return { exitCode: 0, stdout: 'origin/main\n', stderr: '' }
         if (command === 'rev-list --left-right --count HEAD...@{upstream}') return { exitCode: 0, stdout: `${ahead}\t${behind}\n`, stderr: '' }
+        if (command === 'status --porcelain=v2 --untracked-files=all') return { exitCode: 0, stdout: statusStdout, stderr: '' }
         return { exitCode: 0, stdout: '', stderr: '' }
       },
     },
@@ -30,6 +31,20 @@ describe('Git 输出解析', () => {
   it('解析 ahead 和 behind 计数', () => {
     expect(parseAheadBehind('3\t5\n')).toEqual({ ahead: 3, behind: 5 })
     expect(parseAheadBehind('')).toEqual({ ahead: 0, behind: 0 })
+  })
+
+  it('统计 status --porcelain=v2 的变更条目数', () => {
+    const stdout = [
+      '# branch.oid 0123456789abcdef',
+      '1 M. N... 000000 000000 100644 100644 000000000 abcdef0123 src/a.ts',
+      '2 R. N... 000000 000000 100644 100644 000000000 abcdef0123 R100 src/c.ts\tsrc/b.ts',
+      'u UU 000000 000000 000000 111111 222222 333333 both.txt',
+      '? untracked.txt',
+      '! ignored.txt',
+      '',
+    ].join('\n')
+    expect(parseChangeCount(stdout)).toBe(4)
+    expect(parseChangeCount('')).toBe(0)
   })
 
   it('解析递归子模块声明路径', () => {
@@ -177,5 +192,16 @@ describe('Git 同步', () => {
     calls.length = 0
     await service.sync({ path: root, repositoryId: '' })
     expect(calls.some(argv => argv[0] === 'pull' || argv[0] === 'push')).toBe(false)
+  })
+
+  it('快照携带仓库本地未提交变更数', async () => {
+    const root = await realpath(process.cwd())
+    const { runner } = commandRunner(root, 1, 0, '1 M src/a.ts\n2 R. src/c.ts\tsrc/b.ts\n? new.txt\n')
+    const service = new GitHistoryService(runner, { async resolve() { return { ok: true, value: root } } })
+
+    const snapshot = await service.snapshot(root, false)
+    expect(snapshot.ok).toBe(true)
+    if (!snapshot.ok) return
+    expect(snapshot.value.repository).toMatchObject({ branch: 'main', ahead: 1, behind: 0, changes: 3 })
   })
 })

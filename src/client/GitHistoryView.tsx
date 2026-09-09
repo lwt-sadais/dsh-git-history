@@ -78,6 +78,7 @@ function RepositoryTree({
           {repository.initialized && <span className="dghBranch" title={repository.tracking ?? t('noUpstream')}>
             <span aria-hidden="true">⑂</span> {repository.branch ?? t('noBranch')}
           </span>}
+          {repository.initialized && repository.changes > 0 && <span className="dghChanges" title={t('localChanges', { count: repository.changes })}>{repository.changes}</span>}
         </button>
         {(repository.ahead > 0 || repository.behind > 0) && <button
           type="button"

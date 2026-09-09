@@ -17,6 +17,7 @@ export declare const zh: {
     readonly loadingMore: "正在加载…";
     readonly ahead: "本地领先 {count} 个提交";
     readonly behind: "本地落后 {count} 个提交";
+    readonly localChanges: "本地有 {count} 个未提交变更";
     readonly sync: "与远端同步";
     readonly syncing: "正在同步…";
     readonly syncCompleted: "同步完成：拉取 {pulled} 个、推送 {pushed} 个提交";
@@ -56,6 +57,7 @@ export declare const en: {
     readonly loadingMore: "Loading…";
     readonly ahead: "{count} commits ahead";
     readonly behind: "{count} commits behind";
+    readonly localChanges: "{count} uncommitted changes";
     readonly sync: "Sync with remote";
     readonly syncing: "Syncing…";
     readonly syncCompleted: "Sync completed: pulled {pulled}, pushed {pushed} commits";

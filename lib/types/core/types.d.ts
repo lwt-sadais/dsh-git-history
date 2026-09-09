@@ -7,6 +7,8 @@ export interface RepositoryNode {
     readonly tracking: string | null;
     readonly ahead: number;
     readonly behind: number;
+    /** 本地未提交变更文件数，含未跟踪文件；同一文件暂存与未暂存改动只计 1 次。 */
+    readonly changes: number;
     readonly fetchError: string | null;
     readonly children: readonly RepositoryNode[];
 }
