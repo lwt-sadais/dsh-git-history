@@ -5,6 +5,8 @@ import { diffLines } from 'diff'
 import type {
   ApiError,
   ApiResult,
+  BranchListRequest,
+  BranchListResult,
   ChangeMarker,
   CommitDetail,
   CommitDetailRequest,
@@ -18,6 +20,8 @@ import type {
   HistoryRequest,
   RepositoryNode,
   RepositorySnapshot,
+  SwitchBranchRequest,
+  SwitchBranchResult,
   SyncRequest,
   SyncResult,
 } from '../core/types.js'
@@ -216,12 +220,77 @@ export function parseHistory(stdout: string): CommitEntry[] {
   })
 }
 
+/** 解析 for-each-ref 的短引用行输出，忽略空行。 */
+export function parseBranchRefs(stdout: string): string[] {
+  return stdout.split(/\r?\n/u).map(line => line.trim()).filter(line => line !== '')
+}
+
+/** 将远程跟踪短引用按已知远程名切分为目标本地分支短名，取最长匹配的远程名。 */
+export function splitRemoteRef(remoteNames: readonly string[], ref: string): string | null {
+  let matchedLength = 0
+  let short: string | null = null
+  for (const name of remoteNames) {
+    if (name.length <= matchedLength || !ref.startsWith(`${name}/`)) continue
+    const tail = ref.slice(name.length + 1)
+    if (tail === '') continue
+    matchedLength = name.length
+    short = tail
+  }
+  return short
+}
+
+/** 过滤远程分支列表：剔除 HEAD 符号引用与本地已有同名分支，保证每个远程项的切换语义唯一。 */
+export function filterRemoteBranches(remoteNames: readonly string[], remoteRefs: readonly string[], local: readonly string[]): string[] {
+  const localSet = new Set(local)
+  const remote: string[] = []
+  for (const ref of remoteRefs) {
+    if (ref.endsWith('/HEAD')) continue
+    const short = splitRemoteRef(remoteNames, ref)
+    if (short === null || localSet.has(short)) continue
+    remote.push(ref)
+  }
+  return remote
+}
+
 export class GitHistoryService {
   private readonly repositories = new Map<string, ReadonlyMap<string, string>>()
   private readonly commitManifests = new Map<string, StoredCommitManifest>()
 
   /** 创建服务并注入受控 Git 执行器和已注册工作区校验器。 */
   constructor(private readonly runner: GitRunner, private readonly gate: WorkspaceGate) {}
+
+  /** 校验工作区路径并解析服务端最近一次扫描签发的仓库根目录。 */
+  private async resolveRepository(path: string, repositoryId: string): Promise<ApiResult<string>> {
+    const workspace = await this.gate.resolve(path)
+    if (!workspace.ok) return workspace
+    const root = this.repositories.get(workspace.value)?.get(repositoryId)
+    return root === undefined
+      ? fail('repository-unknown', 'repository is stale; refresh the Git view')
+      : { ok: true, value: root }
+  }
+
+  /** 枚举本地分支、远程跟踪引用、远程名和当前分支，供分支列表与切换校验复用。 */
+  private async readRefs(root: string, signal?: AbortSignal): Promise<ApiResult<{
+    current: string | null
+    local: string[]
+    remoteRefs: string[]
+    remoteNames: string[]
+  }>> {
+    const localResult = await this.runner.run(['for-each-ref', 'refs/heads', '--format=%(refname:short)'], root, signal)
+    if (localResult.exitCode !== 0) return fail('internal', 'unable to read Git branches')
+    const remoteResult = await this.runner.run(['for-each-ref', 'refs/remotes', '--format=%(refname:short)'], root, signal)
+    const remoteNamesResult = await this.runner.run(['remote'], root, signal)
+    const headResult = await this.runner.run(['symbolic-ref', '--quiet', '--short', 'HEAD'], root, signal)
+    return {
+      ok: true,
+      value: {
+        current: headResult.exitCode === 0 ? firstLine(headResult.stdout) : null,
+        local: parseBranchRefs(localResult.stdout),
+        remoteRefs: remoteResult.exitCode === 0 ? parseBranchRefs(remoteResult.stdout) : [],
+        remoteNames: remoteNamesResult.exitCode === 0 ? parseBranchRefs(remoteNamesResult.stdout) : [],
+      },
+    }
+  }
 
   /** 探测仓库当前分支、跟踪分支、同步计数和本地未提交变更数。 */
   private async readIdentity(root: string, signal?: AbortSignal): Promise<Omit<RepositoryNode, 'id' | 'name' | 'path' | 'initialized' | 'fetchError' | 'children'>> {
@@ -354,10 +423,9 @@ export class GitHistoryService {
 
   /** 分页读取服务端最近一次扫描确认过的仓库提交历史。 */
   async history(request: HistoryRequest, signal?: AbortSignal): Promise<ApiResult<HistoryPage>> {
-    const workspace = await this.gate.resolve(request.path)
-    if (!workspace.ok) return workspace
-    const root = this.repositories.get(workspace.value)?.get(request.repositoryId)
-    if (root === undefined) return fail('repository-unknown', 'repository is stale; refresh the Git view')
+    const resolved = await this.resolveRepository(request.path, request.repositoryId)
+    if (!resolved.ok) return resolved
+    const root = resolved.value
     const format = `%H${FIELD_SEPARATOR}%h${FIELD_SEPARATOR}%aI${FIELD_SEPARATOR}%s${FIELD_SEPARATOR}%an${FIELD_SEPARATOR}%ae${FIELD_SEPARATOR}%D${RECORD_SEPARATOR}`
     const result = await this.runner.run([
       '--no-pager', 'log', `--skip=${request.skip}`, `--max-count=${request.limit + 1}`, `--pretty=format:${format}`,
@@ -375,10 +443,9 @@ export class GitHistoryService {
 
   /** 验证提交属于已扫描仓库，并签发短期文件清单供后续按需读取。 */
   async commit(request: CommitDetailRequest, signal?: AbortSignal): Promise<ApiResult<CommitDetail>> {
-    const workspace = await this.gate.resolve(request.path)
-    if (!workspace.ok) return workspace
-    const root = this.repositories.get(workspace.value)?.get(request.repositoryId)
-    if (root === undefined) return fail('repository-unknown', 'repository is stale; refresh the Git view')
+    const resolved = await this.resolveRepository(request.path, request.repositoryId)
+    if (!resolved.ok) return resolved
+    const root = resolved.value
     const verified = await this.runner.run(['cat-file', '-e', `${request.commitHash}^{commit}`], root, signal)
     if (verified.exitCode !== 0) return fail('commit-unknown', 'commit is unavailable in this repository')
     const parent = await this.runner.run(['rev-parse', '--verify', `${request.commitHash}^1`], root, signal)
@@ -393,7 +460,7 @@ export class GitHistoryService {
     const now = Date.now()
     for (const [id, manifest] of this.commitManifests) if (manifest.expiresAt <= now) this.commitManifests.delete(id)
     while (this.commitManifests.size >= MAX_MANIFESTS) this.commitManifests.delete(this.commitManifests.keys().next().value!)
-    this.commitManifests.set(manifestId, { workspace: workspace.value, expiresAt: now + MANIFEST_TTL_MS, files: entries })
+    this.commitManifests.set(manifestId, { workspace: resolved.value, expiresAt: now + MANIFEST_TTL_MS, files: entries })
     return { ok: true, value: { manifestId, parentHash, files } }
   }
 
@@ -440,10 +507,9 @@ export class GitHistoryService {
 
   /** 按 EnsoAI 的同步顺序先拉取落后提交，再推送本地领先提交。 */
   async sync(request: SyncRequest, signal?: AbortSignal): Promise<ApiResult<SyncResult>> {
-    const workspace = await this.gate.resolve(request.path)
-    if (!workspace.ok) return workspace
-    const root = this.repositories.get(workspace.value)?.get(request.repositoryId)
-    if (root === undefined) return fail('repository-unknown', 'repository is stale; refresh the Git view')
+    const resolved = await this.resolveRepository(request.path, request.repositoryId)
+    if (!resolved.ok) return resolved
+    const root = resolved.value
     const identity = await this.readIdentity(root, signal)
     if (identity.tracking === null) return fail('internal', 'repository has no upstream branch')
     if (identity.behind > 0) {
@@ -455,6 +521,45 @@ export class GitHistoryService {
       if (push.exitCode !== 0) return fail('internal', (firstLine(push.stderr) ?? 'git push failed').slice(0, 500))
     }
     return { ok: true, value: { branch: identity.branch, pulled: identity.behind, pushed: identity.ahead } }
+  }
+
+  /** 枚举仓库的本地与远程分支；远程组剔除 HEAD 符号引用与本地同名分支，detached HEAD 时 current 为 null。 */
+  async branches(request: BranchListRequest, signal?: AbortSignal): Promise<ApiResult<BranchListResult>> {
+    const resolved = await this.resolveRepository(request.path, request.repositoryId)
+    if (!resolved.ok) return resolved
+    const refs = await this.readRefs(resolved.value, signal)
+    if (!refs.ok) return refs
+    return {
+      ok: true,
+      value: {
+        current: refs.value.current,
+        local: refs.value.local,
+        remote: filterRemoteBranches(refs.value.remoteNames, refs.value.remoteRefs, refs.value.local),
+      },
+    }
+  }
+
+  /** 切换到本地分支，或基于远程引用创建同名跟踪分支后切换；引用名必须命中服务端重新枚举的结果。 */
+  async switchBranch(request: SwitchBranchRequest, signal?: AbortSignal): Promise<ApiResult<SwitchBranchResult>> {
+    const resolved = await this.resolveRepository(request.path, request.repositoryId)
+    if (!resolved.ok) return resolved
+    const root = resolved.value
+    const refs = await this.readRefs(root, signal)
+    if (!refs.ok) return refs
+    const { local, remoteRefs, remoteNames } = refs.value
+    if (local.includes(request.branch)) {
+      const switched = await this.runner.run(['switch', request.branch], root, signal)
+      return switched.exitCode === 0
+        ? { ok: true, value: { branch: request.branch } }
+        : fail('internal', (firstLine(switched.stderr) ?? 'git switch failed').slice(0, 500))
+    }
+    const short = remoteRefs.includes(request.branch) ? splitRemoteRef(remoteNames, request.branch) : null
+    // 短名命中本地分支说明客户端列表已过期，交由用户刷新后重试，避免歧义覆盖。
+    if (short === null || local.includes(short)) return fail('branch-unknown', 'branch is not available in this repository')
+    const created = await this.runner.run(['switch', '-c', short, '--track', request.branch], root, signal)
+    return created.exitCode === 0
+      ? { ok: true, value: { branch: short } }
+      : fail('internal', (firstLine(created.stderr) ?? 'git switch failed').slice(0, 500))
   }
 }
 

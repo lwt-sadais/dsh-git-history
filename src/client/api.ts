@@ -1,4 +1,4 @@
-import type { ApiResult, CommitDetail, CommitDetailRequest, CommitFile, CommitFileRequest, HistoryPage, HistoryRequest, RepositorySnapshot, SyncRequest, SyncResult } from '../core/types.js'
+import type { ApiResult, BranchListRequest, BranchListResult, CommitDetail, CommitDetailRequest, CommitFile, CommitFileRequest, HistoryPage, HistoryRequest, RepositorySnapshot, SwitchBranchRequest, SwitchBranchResult, SyncRequest, SyncResult } from '../core/types.js'
 
 const FALLBACK: ApiResult<never> = {
   ok: false,
@@ -46,4 +46,14 @@ export function readCommitFile(request: CommitFileRequest, signal?: AbortSignal)
 /** 按远端跟踪状态先 pull 后 push 同步指定仓库。 */
 export function syncRepository(request: SyncRequest, signal?: AbortSignal): Promise<ApiResult<SyncResult>> {
   return post('/api/dsh-git-history/sync', request, signal)
+}
+
+/** 列出仓库的本地与远程分支；detached HEAD 时 current 为 null。 */
+export function readBranches(request: BranchListRequest, signal?: AbortSignal): Promise<ApiResult<BranchListResult>> {
+  return post('/api/dsh-git-history/branches', request, signal)
+}
+
+/** 切换到本地分支，或基于远程引用创建同名跟踪分支后切换。 */
+export function switchBranch(request: SwitchBranchRequest, signal?: AbortSignal): Promise<ApiResult<SwitchBranchResult>> {
+  return post('/api/dsh-git-history/switch-branch', request, signal)
 }

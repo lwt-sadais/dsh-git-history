@@ -78,14 +78,20 @@
 .dghRepositories { min-width: 0; border-right: 1px solid var(--dsw-alias-border-l2); padding: 6px 0; overflow: auto; }
 .dghRepositoriesTitle { position: sticky; z-index: 2; top: -6px; color: var(--dsw-alias-label-tertiary); background: var(--dsw-alias-bg-base); border-bottom: 1px solid var(--dsw-alias-border-l3); padding: 8px 14px; font-size: 11px; font-weight: 600; text-transform: uppercase; }
 .dghTreeNode { min-width: max-content; }
-.dghRepository { display: flex; width: 100%; min-width: 390px; height: 34px; align-items: center; color: var(--dsw-alias-label-secondary); padding-right: 10px; }
+.dghRepository { display: flex; width: 100%; min-width: 330px; height: 34px; align-items: center; color: var(--dsw-alias-label-secondary); padding-right: 10px; }
 .dghRepository:hover { background: var(--dsw-alias-interactive-bg-hover); }
 .dghRepositoryActive { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-interactive-bg-selected, var(--dsw-alias-interactive-bg-hover)); }
 .dghRepositorySelect { display: flex; min-width: 0; height: 100%; align-items: center; gap: 8px; color: inherit; text-align: left; cursor: pointer; background: transparent; border: 0; flex: 1; }
 .dghRepositorySelect:disabled { cursor: default; opacity: .6; }
 .dghTreeGuide { width: 14px; color: var(--dsw-alias-label-tertiary); text-align: center; flex: none; }
 .dghRepositoryName { min-width: 70px; max-width: 180px; font-size: 13px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; overflow: hidden; }
-.dghBranch { display: inline-flex; min-width: 0; max-width: 130px; align-items: center; gap: 3px; color: var(--dsw-alias-label-tertiary); font-family: var(--ds-font-family-code); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; overflow: hidden; }
+.dghBranchSwitch { display: inline-flex; min-width: 26px; height: 26px; align-items: center; gap: 3px; color: var(--dsw-alias-label-tertiary); cursor: pointer; background: transparent; border: 0; border-radius: 6px; padding: 0 5px; flex: none; }
+.dghBranchSwitch:hover:not(:disabled) { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-interactive-bg-hover); }
+.dghBranchSwitch:disabled { cursor: default; opacity: .55; }
+.dghBranchIcon { font-size: 11px; line-height: 1; flex: none; }
+.dghBranchName { min-width: 0; max-width: 150px; font-family: var(--ds-font-family-code); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; overflow: hidden; }
+.dghBranchDetached { color: var(--dsw-alias-state-warn-label); }
+.dghBranchCaret { font-size: 9px; line-height: 1; flex: none; opacity: .8; }
 .dghMuted { color: var(--dsw-alias-label-tertiary); font-size: 11px; }
 .dghSync { display: inline-flex; min-width: 42px; min-height: 26px; align-items: center; justify-content: center; gap: 6px; margin-left: auto; cursor: pointer; background: transparent; border: 0; border-radius: 6px; padding: 0 5px; }
 .dghSync:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }
@@ -163,6 +169,30 @@
 .dghMarkerDelete { background: #d55b5b; }
 .dghMarkerInsert { background: #2b9b62; }
 
+.dghBranchMenu { position: fixed; z-index: 1020; display: flex; min-width: 220px; max-width: 300px; flex-direction: column; color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-base); border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px; box-shadow: var(--dsw-shadow-lv4); overflow: auto; padding: 4px; }
+.dghBranchMenuHint { color: var(--dsw-alias-state-warn-label); background: var(--dsw-alias-interactive-bg-hover); border-radius: 6px; padding: 6px 8px; margin-bottom: 4px; font-size: 11px; line-height: 16px; }
+.dghBranchMenuState { color: var(--dsw-alias-label-tertiary); font-size: 12px; text-align: center; padding: 10px; }
+.dghBranchGroup { display: flex; flex-direction: column; }
+.dghBranchGroupLabel { color: var(--dsw-alias-label-tertiary); font-size: 10px; font-weight: 600; text-transform: uppercase; padding: 6px 8px 3px; }
+.dghBranchOption { display: flex; min-height: 28px; align-items: center; gap: 6px; color: var(--dsw-alias-label-secondary); text-align: left; cursor: pointer; background: transparent; border: 0; border-radius: 6px; padding: 4px 8px; font-family: var(--ds-font-family-code); font-size: 12px; }
+.dghBranchOption:hover:not(:disabled), .dghBranchOption:focus-visible { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-interactive-bg-hover); outline: 0; }
+.dghBranchOption:disabled { cursor: default; opacity: .6; }
+.dghBranchOptionCurrent { color: var(--dsw-alias-label-primary); }
+.dghBranchOptionRemote .dghBranchOptionName { color: var(--dsw-alias-label-tertiary); }
+.dghBranchMark { width: 12px; text-align: center; font-size: 11px; flex: none; }
+.dghBranchOptionName { min-width: 0; text-overflow: ellipsis; white-space: nowrap; overflow: hidden; }
+
+.dghConfirmOverlay { position: fixed; z-index: 1030; display: flex; inset: 0; align-items: center; justify-content: center; padding: 24px; }
+.dghConfirmMask { position: absolute; background: #05070cbb; border: 0; inset: 0; }
+.dghConfirmPanel { position: relative; display: flex; width: min(420px, calc(100vw - 48px)); flex-direction: column; gap: 10px; color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-base); border: 1px solid var(--dsw-alias-border-l2); border-radius: 12px; box-shadow: var(--dsw-shadow-lv4); padding: 16px; }
+.dghConfirmPanel h3 { margin: 0; font-size: 14px; font-weight: 600; line-height: 20px; }
+.dghConfirmPanel p { margin: 0; color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 19px; }
+.dghConfirmActions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 2px; }
+.dghConfirmSecondary { display: inline-flex; min-height: 30px; align-items: center; justify-content: center; color: var(--dsw-alias-label-secondary); cursor: pointer; background: transparent; border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; padding: 0 12px; }
+.dghConfirmSecondary:hover { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-interactive-bg-hover); }
+.dghConfirmPrimary { display: inline-flex; min-height: 30px; align-items: center; justify-content: center; color: #fff; cursor: pointer; background: var(--dsw-alias-brand-primary, var(--dsw-alias-label-primary)); border: 0; border-radius: 8px; padding: 0 12px; }
+.dghConfirmPrimary:disabled { cursor: default; opacity: .55; }
+
 @keyframes dgh-spin { to { transform: rotate(360deg); } }
 
 @media (max-width: 760px) {
@@ -170,9 +200,9 @@
   .dghPanel { width: calc(100vw - 24px); height: calc(100vh - 24px); }
   .dghContent { grid-template-columns: 1fr; grid-template-rows: minmax(130px, 34%) minmax(0, 1fr); }
   .dghRepositories { border-right: 0; border-bottom: 1px solid var(--dsw-alias-border-l2); }
-  .dghRepository { min-width: 320px; }
+  .dghRepository { min-width: 300px; }
   .dghRepositoryName { max-width: 150px; }
-  .dghBranch { max-width: 100px; }
+  .dghBranchName { max-width: 120px; }
   .dghHeader { padding-inline: 12px; }
   .dghDetailOverlay { padding: 12px; }
   .dghDetailPanel { width: calc(100vw - 24px); height: calc(100vh - 24px); }

@@ -1,14 +1,21 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { CommitDetail, CommitEntry, CommitFile, CommitFileSummary, DiffLine, RepositoryNode } from '../core/types.js'
-import { readCommit, readCommitFile, readHistory, readRepositorySnapshot, syncRepository } from './api.js'
+import type { BranchListResult, CommitDetail, CommitEntry, CommitFile, CommitFileSummary, DiffLine, RepositoryNode } from '../core/types.js'
+import { readBranches, readCommit, readCommitFile, readHistory, readRepositorySnapshot, switchBranch, syncRepository } from './api.js'
 
 export type GitHistoryViewProps = PropsRuntime<'conversation.input.left'> & PropsLocale<'git-history'>
 
 const PAGE_SIZE = 20
 const DIFF_ROW_HEIGHT = 20
 const DIFF_OVERSCAN = 20
+/** 分支菜单的定位与尺寸约束（px）。 */
+const BRANCH_MENU_WIDTH = 300
+const BRANCH_MENU_GAP = 4
+const BRANCH_MENU_MARGIN = 8
+
+/** 同步与分支切换共用一个互斥标记，避免两种变更操作并发修改同一工作区。 */
+type BusyState = { readonly id: string, readonly kind: 'sync' | 'switch' } | null
 
 const STATUS_KEYS = {
   modified: 'statusModified', added: 'statusAdded', deleted: 'statusDeleted', renamed: 'statusRenamed',
@@ -42,14 +49,21 @@ function formatDate(value: string): string {
   return new Intl.DateTimeFormat(undefined, { year: 'numeric', month: '2-digit', day: '2-digit' }).format(date)
 }
 
-/** 渲染递归仓库节点，并保持子模块的树状缩进。 */
+/** 判断分支显示值是否为分离 HEAD 状态。 */
+function isDetachedHead(branch: string | null): boolean {
+  return branch !== null && branch.startsWith('detached@')
+}
+
+/** 渲染递归仓库节点，并保持子模块的树状缩进；分支按钮与同步按钮是行内独立的操作目标。 */
 function RepositoryTree({
   repository,
   selectedId,
   depth,
   onSelect,
   onSync,
-  syncingId,
+  onOpenBranches,
+  busy,
+  menuRepositoryId,
   t,
 }: {
   readonly repository: RepositoryNode
@@ -57,10 +71,14 @@ function RepositoryTree({
   readonly depth: number
   readonly onSelect: (repository: RepositoryNode) => void
   readonly onSync: (repository: RepositoryNode) => void
-  readonly syncingId: string | null
+  readonly onOpenBranches: (repository: RepositoryNode, anchor: DOMRect) => void
+  readonly busy: BusyState
+  readonly menuRepositoryId: string | null
   readonly t: GitHistoryViewProps['t']
 }) {
   const selected = repository.id === selectedId
+  const detached = isDetachedHead(repository.branch)
+  const lockBusy = busy !== null || (menuRepositoryId !== null && menuRepositoryId !== repository.id)
   return (
     <div className="dghTreeNode">
       <div className={`dghRepository ${selected ? 'dghRepositoryActive' : ''}`}>
@@ -75,19 +93,29 @@ function RepositoryTree({
           <span className="dghTreeGuide" aria-hidden="true">{depth === 0 ? '◆' : '└'}</span>
           <span className="dghRepositoryName">{repository.name}</span>
           {!repository.initialized && <span className="dghMuted">{t('uninitialized')}</span>}
-          {repository.initialized && <span className="dghBranch" title={repository.tracking ?? t('noUpstream')}>
-            <span aria-hidden="true">⑂</span> {repository.branch ?? t('noBranch')}
-          </span>}
           {repository.initialized && repository.changes > 0 && <span className="dghChanges" title={t('localChanges', { count: repository.changes })}>{repository.changes}</span>}
         </button>
+        {repository.initialized && <button
+          type="button"
+          className="dghBranchSwitch"
+          disabled={lockBusy}
+          aria-haspopup="listbox"
+          aria-expanded={menuRepositoryId === repository.id}
+          title={repository.tracking ?? t('noUpstream')}
+          onClick={event => onOpenBranches(repository, event.currentTarget.getBoundingClientRect())}
+        >
+          <span className="dghBranchIcon" aria-hidden="true">⑂</span>
+          <span className={`dghBranchName ${detached ? 'dghBranchDetached' : ''}`}>{repository.branch ?? t('noBranch')}</span>
+          <span className="dghBranchCaret" aria-hidden="true">▾</span>
+        </button>}
         {(repository.ahead > 0 || repository.behind > 0) && <button
           type="button"
           className="dghSync"
-          disabled={syncingId !== null}
+          disabled={busy !== null || menuRepositoryId !== null}
           onClick={() => onSync(repository)}
-          title={syncingId === repository.id ? t('syncing') : t('sync')}
+          title={busy?.id === repository.id && busy.kind === 'sync' ? t('syncing') : t('sync')}
         >
-          {syncingId === repository.id ? <span className="dghSpin" aria-hidden="true">↻</span> : <>
+          {busy?.id === repository.id && busy.kind === 'sync' ? <span className="dghSpin" aria-hidden="true">↻</span> : <>
             {repository.ahead > 0 && <span className="dghAhead" title={t('ahead', { count: repository.ahead })}>{repository.ahead} ↑</span>}
             {repository.behind > 0 && <span className="dghBehind" title={t('behind', { count: repository.behind })}>{repository.behind} ↓</span>}
           </>}
@@ -102,7 +130,9 @@ function RepositoryTree({
           depth={depth + 1}
           onSelect={onSelect}
           onSync={onSync}
-          syncingId={syncingId}
+          onOpenBranches={onOpenBranches}
+          busy={busy}
+          menuRepositoryId={menuRepositoryId}
           t={t}
         />
       ))}
@@ -128,6 +158,140 @@ function CommitRow({ commit, onOpen }: { readonly commit: CommitEntry, readonly 
         </div>}
       </div>
     </button>
+  )
+}
+
+/** 分支选择菜单：懒加载本地与远程分支，支持键盘导航与分离 HEAD 提示。 */
+function BranchMenu({ repository, path, anchor, busy, onSelect, onClose, t }: {
+  readonly repository: RepositoryNode
+  readonly path: string
+  readonly anchor: DOMRect
+  readonly busy: BusyState
+  readonly onSelect: (ref: string, remote: boolean) => void
+  readonly onClose: () => void
+  readonly t: GitHistoryViewProps['t']
+}) {
+  const menuRef = useRef<HTMLDivElement>(null)
+  const [branches, setBranches] = useState<BranchListResult | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [pending, setPending] = useState<string | null>(null)
+  const [position, setPosition] = useState<{ left: number, top: number, maxHeight: number } | null>(null)
+  const detached = isDetachedHead(repository.branch)
+
+  useEffect(() => {
+    const controller = new AbortController()
+    setBranches(null)
+    setLoadError(null)
+    void readBranches({ path, repositoryId: repository.id }, controller.signal).then(result => {
+      if (result.ok) setBranches(result.value)
+      else setLoadError(result.error.message)
+    }).catch(cause => {
+      if (!(cause instanceof DOMException && cause.name === 'AbortError')) setLoadError(String(cause))
+    })
+    return () => controller.abort()
+  }, [path, repository.id])
+
+  /** 依据锚点矩形计算菜单位置：优先展开在按钮下方，空间不足时翻转到上方并钳制在视口内。 */
+  useLayoutEffect(() => {
+    const menu = menuRef.current
+    if (menu === null) return
+    const width = Math.min(BRANCH_MENU_WIDTH, window.innerWidth - BRANCH_MENU_MARGIN * 2)
+    const left = Math.min(Math.max(BRANCH_MENU_MARGIN, anchor.right - width), window.innerWidth - width - BRANCH_MENU_MARGIN)
+    const height = menu.offsetHeight
+    const below = window.innerHeight - anchor.bottom
+    const above = anchor.top
+    if (below >= height || below >= above) {
+      setPosition({ left, top: anchor.bottom + BRANCH_MENU_GAP, maxHeight: below - BRANCH_MENU_GAP - BRANCH_MENU_MARGIN })
+    } else {
+      const visible = Math.min(height, above - BRANCH_MENU_GAP - BRANCH_MENU_MARGIN)
+      setPosition({ left, top: anchor.top - BRANCH_MENU_GAP - visible, maxHeight: visible })
+    }
+  }, [anchor])
+
+  useEffect(() => {
+    /** 点击菜单外部时关闭；滚动或缩放时锚点失效，同样关闭。 */
+    const outside = (event: Event) => {
+      const menu = menuRef.current
+      if (menu !== null && event.target instanceof Node && menu.contains(event.target)) return
+      onClose()
+    }
+    document.addEventListener('pointerdown', outside)
+    document.addEventListener('scroll', outside, true)
+    window.addEventListener('resize', onClose)
+    return () => {
+      document.removeEventListener('pointerdown', outside)
+      document.removeEventListener('scroll', outside, true)
+      window.removeEventListener('resize', onClose)
+    }
+  }, [onClose])
+
+  /** 切换结束后清除选项上的进行中标记。 */
+  useEffect(() => { if (busy === null) setPending(null) }, [busy])
+
+  /** 列表加载完成后把焦点放到当前分支或首个选项，保证方向键可直接浏览。 */
+  useEffect(() => {
+    if (branches === null) return
+    const items = menuRef.current?.querySelectorAll<HTMLButtonElement>('.dghBranchOption')
+    const current = Array.from(items ?? []).find(item => item.dataset.current === 'true') ?? items?.[0]
+    current?.focus()
+  }, [branches])
+
+  /** 在分支选项之间移动键盘焦点。 */
+  const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+    event.preventDefault()
+    const items = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>('.dghBranchOption') ?? [])
+    if (items.length === 0) return
+    const index = items.indexOf(document.activeElement as HTMLButtonElement)
+    const step = event.key === 'ArrowDown' ? 1 : -1
+    const next = index < 0 ? (step === 1 ? 0 : items.length - 1) : (index + step + items.length) % items.length
+    items[next]?.focus()
+  }
+
+  /** 渲染单个分支选项；当前分支打勾，切换进行中的项显示旋转标记。 */
+  const renderOption = (ref: string, remote: boolean, current: boolean) => (
+    <button
+      type="button"
+      key={ref}
+      className={`dghBranchOption ${remote ? 'dghBranchOptionRemote' : ''} ${current ? 'dghBranchOptionCurrent' : ''}`}
+      data-current={current ? 'true' : 'false'}
+      role="option"
+      aria-selected={current}
+      disabled={busy !== null}
+      onClick={() => { if (busy === null) { setPending(ref); onSelect(ref, remote) } }}
+    >
+      <span className="dghBranchMark" aria-hidden="true">{pending === ref && busy !== null ? <span className="dghSpin">↻</span> : current ? '✓' : ''}</span>
+      <span className="dghBranchOptionName">{ref}</span>
+    </button>
+  )
+
+  return createPortal(
+    <div
+      ref={menuRef}
+      className="dghBranchMenu"
+      style={position === null
+        ? { left: anchor.left, top: anchor.bottom, visibility: 'hidden' as const }
+        : { left: position.left, top: position.top, maxHeight: position.maxHeight }}
+      onKeyDown={handleKeyDown}
+    >
+      {detached && <div className="dghBranchMenuHint">{t('detachedHint', { hash: repository.branch ?? '' })}</div>}
+      {branches === null && loadError === null && <div className="dghBranchMenuState">{t('branchLoading')}</div>}
+      {loadError !== null && <div className="dghBranchMenuState dghError">{loadError}</div>}
+      {branches !== null && branches.local.length === 0 && branches.remote.length === 0 && <div className="dghBranchMenuState">{t('branchEmpty')}</div>}
+      {branches !== null && branches.local.length > 0 && <>
+        <div className="dghBranchGroupLabel">{t('branchGroup')}</div>
+        <div className="dghBranchGroup" role="listbox" aria-label={t('branchGroup')}>
+          {branches.local.map(ref => renderOption(ref, false, ref === branches.current))}
+        </div>
+      </>}
+      {branches !== null && branches.remote.length > 0 && <>
+        <div className="dghBranchGroupLabel">{t('remoteGroup')}</div>
+        <div className="dghBranchGroup" role="listbox" aria-label={t('remoteGroup')}>
+          {branches.remote.map(ref => renderOption(ref, true, false))}
+        </div>
+      </>}
+    </div>,
+    document.body,
   )
 }
 
@@ -269,7 +433,9 @@ export function GitHistoryView(props: GitHistoryViewProps) {
   const [refreshing, setRefreshing] = useState(false)
   const [historyLoading, setHistoryLoading] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
-  const [syncingId, setSyncingId] = useState<string | null>(null)
+  const [busy, setBusy] = useState<BusyState>(null)
+  const [branchMenu, setBranchMenu] = useState<{ repository: RepositoryNode, anchor: DOMRect } | null>(null)
+  const [pendingSwitch, setPendingSwitch] = useState<{ repositoryId: string, ref: string, remote: boolean, changes: number } | null>(null)
   const [historyRevision, setHistoryRevision] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [syncMessage, setSyncMessage] = useState<string | null>(null)
@@ -375,17 +541,20 @@ export function GitHistoryView(props: GitHistoryViewProps) {
     if (!open) return
     const close = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
+      // Esc 按层叠从上到下逐层关闭：确认弹窗 → 分支菜单 → 提交详情 → 主弹窗。
+      if (pendingSwitch !== null) { setPendingSwitch(null); return }
+      if (branchMenu !== null) { setBranchMenu(null); return }
       selectedCommit === null ? setOpen(false) : setSelectedCommit(null)
     }
     document.addEventListener('keydown', close)
     return () => document.removeEventListener('keydown', close)
-  }, [open, selectedCommit])
+  }, [open, selectedCommit, branchMenu, pendingSwitch])
 
   /** 同步指定仓库，并在成功后刷新仓库计数和当前提交历史。 */
   const sync = useCallback(async (item: RepositoryNode) => {
-    if (cwd === undefined || cwd === '' || syncingId !== null) return
+    if (cwd === undefined || cwd === '' || busy !== null) return
     setSelectedId(item.id)
-    setSyncingId(item.id)
+    setBusy({ id: item.id, kind: 'sync' })
     setSyncMessage(null)
     setSyncError(null)
     const result = await syncRepository({ path: cwd, repositoryId: item.id })
@@ -396,8 +565,38 @@ export function GitHistoryView(props: GitHistoryViewProps) {
     } else {
       setSyncError(result.error.message)
     }
-    setSyncingId(null)
-  }, [cwd, loadSnapshot, syncingId, t])
+    setBusy(null)
+  }, [busy, cwd, loadSnapshot, t])
+
+  /** 执行分支切换；成功后刷新仓库树与当前提交历史，失败透出 Git 首行错误。 */
+  const performSwitch = useCallback(async (repositoryId: string, ref: string) => {
+    if (cwd === undefined || cwd === '' || busy !== null) return
+    setBusy({ id: repositoryId, kind: 'switch' })
+    setSyncMessage(null)
+    setSyncError(null)
+    const result = await switchBranch({ path: cwd, repositoryId, branch: ref })
+    if (result.ok) {
+      setSyncMessage(t('switchCompleted', { branch: result.value.branch }))
+      await loadSnapshot(false)
+      setHistoryRevision(current => current + 1)
+    } else {
+      setSyncError(result.error.message)
+    }
+    setBusy(null)
+  }, [busy, cwd, loadSnapshot, t])
+
+  /** 用户在菜单中选定分支：存在未提交变更时先要求确认，否则直接执行。 */
+  const chooseBranch = useCallback((item: RepositoryNode, ref: string, remote: boolean) => {
+    setBranchMenu(null)
+    if (item.changes > 0) setPendingSwitch({ repositoryId: item.id, ref, remote, changes: item.changes })
+    else void performSwitch(item.id, ref)
+  }, [performSwitch])
+
+  /** 打开指定仓库的分支菜单，并同步选中该仓库保证右侧历史一致。 */
+  const openBranches = useCallback((item: RepositoryNode, anchor: DOMRect) => {
+    setSelectedId(item.id)
+    setBranchMenu({ repository: item, anchor })
+  }, [])
 
   /** 追加下一页历史，同时避免并发重复加载。 */
   const loadMore = useCallback(async () => {
@@ -445,7 +644,7 @@ export function GitHistoryView(props: GitHistoryViewProps) {
             {cwd === undefined || cwd === '' ? <div className="dghState">{t('noWorkspace')}</div> : loading && repository === null ? <div className="dghState">{t('loading')}</div> : error !== null ? <div className="dghState dghError">{error}</div> : repository !== null && <div className="dghContent">
               <aside className="dghRepositories">
                 <div className="dghRepositoriesTitle">{t('repositories')}</div>
-                <RepositoryTree repository={repository} selectedId={selectedId} depth={0} onSelect={item => setSelectedId(item.id)} onSync={item => void sync(item)} syncingId={syncingId} t={t} />
+                <RepositoryTree repository={repository} selectedId={selectedId} depth={0} onSelect={item => setSelectedId(item.id)} onSync={item => void sync(item)} onOpenBranches={openBranches} busy={busy} menuRepositoryId={branchMenu?.repository.id ?? null} t={t} />
               </aside>
               <main className="dghMain">
                 {syncMessage !== null && <div className="dghSyncMessage">{syncMessage}</div>}
@@ -480,6 +679,38 @@ export function GitHistoryView(props: GitHistoryViewProps) {
         onClose={() => setSelectedCommit(null)}
         t={t}
       />}
+      {open && branchMenu !== null && <BranchMenu
+        repository={branchMenu.repository}
+        path={cwd ?? ''}
+        anchor={branchMenu.anchor}
+        busy={busy}
+        onSelect={(ref, remote) => chooseBranch(branchMenu.repository, ref, remote)}
+        onClose={() => setBranchMenu(null)}
+        t={t}
+      />}
+      {pendingSwitch !== null && createPortal(
+        <div className="dghConfirmOverlay" role="alertdialog" aria-modal="true" aria-label={t('confirmSwitchTitle')}>
+          <button type="button" className="dghConfirmMask" onClick={() => setPendingSwitch(null)} aria-label={t('confirmCancel')} />
+          <section className="dghConfirmPanel">
+            <h3>{t('confirmSwitchTitle')}</h3>
+            <p>{pendingSwitch.remote
+              ? t('confirmRemoteSwitchMessage', { ref: pendingSwitch.ref, count: pendingSwitch.changes })
+              : t('confirmSwitchMessage', { count: pendingSwitch.changes })}</p>
+            <div className="dghConfirmActions">
+              <button type="button" className="dghConfirmSecondary" onClick={() => setPendingSwitch(null)}>{t('confirmCancel')}</button>
+              <button
+                type="button"
+                className="dghConfirmPrimary"
+                disabled={busy !== null}
+                onClick={() => { const task = pendingSwitch; setPendingSwitch(null); void performSwitch(task.repositoryId, task.ref) }}
+              >
+                {t('confirmSwitch')}
+              </button>
+            </div>
+          </section>
+        </div>,
+        document.body,
+      )}
     </div>
   )
 }

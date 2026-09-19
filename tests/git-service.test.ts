@@ -1,6 +1,6 @@
 import { realpath } from 'node:fs/promises'
 import { describe, expect, it } from 'vitest'
-import { alignDiff, GitHistoryService, parseAheadBehind, parseChangeCount, parseCommitFiles, parseHistory, parseSubmodulePaths } from '../src/host/git-service.js'
+import { alignDiff, filterRemoteBranches, GitHistoryService, parseAheadBehind, parseBranchRefs, parseChangeCount, parseCommitFiles, parseHistory, parseSubmodulePaths, splitRemoteRef } from '../src/host/git-service.js'
 
 /** 构造与宿主 git log 格式一致的一条测试记录。 */
 function historyRecord(fields: readonly string[]): string {
@@ -203,5 +203,127 @@ describe('Git 同步', () => {
     expect(snapshot.ok).toBe(true)
     if (!snapshot.ok) return
     expect(snapshot.value.repository).toMatchObject({ branch: 'main', ahead: 1, behind: 0, changes: 3 })
+  })
+})
+
+describe('Git 分支', () => {
+  it('解析 for-each-ref 短引用，并过滤 HEAD 与本地同名远程分支', () => {
+    expect(parseBranchRefs('main\nfeature/one\r\n\n')).toEqual(['main', 'feature/one'])
+    const remoteNames = ['origin', 'upstream']
+    expect(splitRemoteRef(remoteNames, 'origin/feature/one')).toBe('feature/one')
+    expect(splitRemoteRef(remoteNames, 'origin/HEAD')).toBe('HEAD')
+    expect(splitRemoteRef(remoteNames, 'no-prefix')).toBe(null)
+    expect(filterRemoteBranches(remoteNames, ['origin/HEAD', 'origin/main', 'origin/feature/one', 'upstream/x'], ['main', 'x']))
+      .toEqual(['origin/feature/one'])
+  })
+
+  it('枚举本地与远程分支，detached HEAD 时 current 为空', async () => {
+    const root = await realpath(process.cwd())
+    const runner = {
+      async run(argv: readonly string[]) {
+        const command = argv.join(' ')
+        if (command === 'rev-parse --show-toplevel') return { exitCode: 0, stdout: `${root}\n`, stderr: '' }
+        if (command === 'symbolic-ref --quiet --short HEAD') return { exitCode: 1, stdout: '', stderr: '' }
+        if (command === 'for-each-ref refs/heads --format=%(refname:short)') return { exitCode: 0, stdout: 'main\ntopic\n', stderr: '' }
+        if (command === 'for-each-ref refs/remotes --format=%(refname:short)') return { exitCode: 0, stdout: 'origin/HEAD\norigin/main\norigin/feature/one\n', stderr: '' }
+        if (command === 'remote') return { exitCode: 0, stdout: 'origin\n', stderr: '' }
+        return { exitCode: 0, stdout: '', stderr: '' }
+      },
+    }
+    const service = new GitHistoryService(runner, { async resolve() { return { ok: true, value: root } } })
+    await service.snapshot(root, false)
+
+    await expect(service.branches({ path: root, repositoryId: '' })).resolves.toEqual({
+      ok: true,
+      value: { current: null, local: ['main', 'topic'], remote: ['origin/feature/one'] },
+    })
+  })
+
+  it('切换本地分支与基于远程引用创建跟踪分支', async () => {
+    const root = await realpath(process.cwd())
+    const calls: string[][] = []
+    const runner = {
+      async run(argv: readonly string[]) {
+        calls.push([...argv])
+        const command = argv.join(' ')
+        if (command === 'rev-parse --show-toplevel') return { exitCode: 0, stdout: `${root}\n`, stderr: '' }
+        if (command === 'symbolic-ref --quiet --short HEAD') return { exitCode: 0, stdout: 'main\n', stderr: '' }
+        if (command === 'for-each-ref refs/heads --format=%(refname:short)') return { exitCode: 0, stdout: 'main\ntopic\n', stderr: '' }
+        if (command === 'for-each-ref refs/remotes --format=%(refname:short)') return { exitCode: 0, stdout: 'origin/HEAD\norigin/main\norigin/next\n', stderr: '' }
+        if (command === 'remote') return { exitCode: 0, stdout: 'origin\n', stderr: '' }
+        return { exitCode: 0, stdout: '', stderr: '' }
+      },
+    }
+    const service = new GitHistoryService(runner, { async resolve() { return { ok: true, value: root } } })
+    await service.snapshot(root, false)
+    calls.length = 0
+
+    await expect(service.switchBranch({ path: root, repositoryId: '', branch: 'topic' })).resolves.toEqual({
+      ok: true,
+      value: { branch: 'topic' },
+    })
+    expect(calls.at(-1)).toEqual(['switch', 'topic'])
+
+    await expect(service.switchBranch({ path: root, repositoryId: '', branch: 'origin/next' })).resolves.toEqual({
+      ok: true,
+      value: { branch: 'next' },
+    })
+    expect(calls.at(-1)).toEqual(['switch', '-c', 'next', '--track', 'origin/next'])
+  })
+
+  it('拒绝不在服务端枚举内的分支名', async () => {
+    const root = await realpath(process.cwd())
+    const runner = {
+      async run(argv: readonly string[]) {
+        const command = argv.join(' ')
+        if (command === 'rev-parse --show-toplevel') return { exitCode: 0, stdout: `${root}\n`, stderr: '' }
+        if (command === 'symbolic-ref --quiet --short HEAD') return { exitCode: 0, stdout: 'main\n', stderr: '' }
+        if (command === 'for-each-ref refs/heads --format=%(refname:short)') return { exitCode: 0, stdout: 'main\n', stderr: '' }
+        if (command === 'for-each-ref refs/remotes --format=%(refname:short)') return { exitCode: 0, stdout: 'origin/HEAD\norigin/main\n', stderr: '' }
+        if (command === 'remote') return { exitCode: 0, stdout: 'origin\n', stderr: '' }
+        return { exitCode: 0, stdout: '', stderr: '' }
+      },
+    }
+    const service = new GitHistoryService(runner, { async resolve() { return { ok: true, value: root } } })
+    await service.snapshot(root, false)
+
+    // origin/main 的短名 main 已在本地，属于过期列表提交的歧义目标，必须拒绝。
+    await expect(service.switchBranch({ path: root, repositoryId: '', branch: 'origin/main' })).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'branch-unknown' },
+    })
+    await expect(service.switchBranch({ path: root, repositoryId: '', branch: 'nope' })).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'branch-unknown' },
+    })
+    await expect(service.switchBranch({ path: root, repositoryId: '', branch: '-force' })).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'branch-unknown' },
+    })
+  })
+
+  it('切换失败时透出 Git 首行错误', async () => {
+    const root = await realpath(process.cwd())
+    const runner = {
+      async run(argv: readonly string[]) {
+        const command = argv.join(' ')
+        if (command === 'rev-parse --show-toplevel') return { exitCode: 0, stdout: `${root}\n`, stderr: '' }
+        if (command === 'symbolic-ref --quiet --short HEAD') return { exitCode: 0, stdout: 'main\n', stderr: '' }
+        if (command === 'for-each-ref refs/heads --format=%(refname:short)') return { exitCode: 0, stdout: 'main\ntopic\n', stderr: '' }
+        if (command === 'switch topic') return {
+          exitCode: 1,
+          stdout: '',
+          stderr: 'error: Your local changes to the following files would be overwritten by checkout:\nsrc/a.ts\n',
+        }
+        return { exitCode: 0, stdout: '', stderr: '' }
+      },
+    }
+    const service = new GitHistoryService(runner, { async resolve() { return { ok: true, value: root } } })
+    await service.snapshot(root, false)
+
+    await expect(service.switchBranch({ path: root, repositoryId: '', branch: 'topic' })).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'internal', message: 'error: Your local changes to the following files would be overwritten by checkout:' },
+    })
   })
 })

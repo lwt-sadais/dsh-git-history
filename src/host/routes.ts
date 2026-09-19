@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { isIP } from 'node:net'
 import type { Context } from '@deepseek-ai/cordis'
-import type { ApiResult, CommitDetail, CommitDetailRequest, CommitFile, CommitFileRequest, HistoryPage, HistoryRequest, RepositorySnapshot, SnapshotRequest, SyncRequest, SyncResult } from '../core/types.js'
+import type { ApiResult, BranchListRequest, BranchListResult, CommitDetail, CommitDetailRequest, CommitFile, CommitFileRequest, HistoryPage, HistoryRequest, RepositorySnapshot, SnapshotRequest, SwitchBranchRequest, SwitchBranchResult, SyncRequest, SyncResult } from '../core/types.js'
 import type { GitHistoryService } from './git-service.js'
 
 const SNAPSHOT_ROUTE = '/api/dsh-git-history/snapshot'
@@ -9,6 +9,8 @@ const HISTORY_ROUTE = '/api/dsh-git-history/log'
 const COMMIT_ROUTE = '/api/dsh-git-history/commit'
 const COMMIT_FILE_ROUTE = '/api/dsh-git-history/commit-file'
 const SYNC_ROUTE = '/api/dsh-git-history/sync'
+const BRANCHES_ROUTE = '/api/dsh-git-history/branches'
+const SWITCH_BRANCH_ROUTE = '/api/dsh-git-history/switch-branch'
 const BODY_CAP = 16 * 1024
 
 /** 仅接受来自当前 DSH 页面、回环地址且使用 JSON 的请求。 */
@@ -98,6 +100,31 @@ function syncRequestOf(value: unknown): SyncRequest | null {
   return path === null || repositoryId === null ? null : { path, repositoryId }
 }
 
+/** 校验分支列表请求。 */
+function branchListRequestOf(value: unknown): BranchListRequest | null {
+  const record = recordOf(value)
+  if (record === null || Object.keys(record).length !== 2) return null
+  const path = boundedString(record.path)
+  const repositoryId = boundedString(record.repositoryId, true)
+  return path === null || repositoryId === null ? null : { path, repositoryId }
+}
+
+/** 分支引用名的基础校验：拒绝选项前缀、空白与控制字符；枚举白名单由服务层把关。 */
+function isSafeRefName(name: string): boolean {
+  return !name.startsWith('-') && !/[\s\u0000-\u001f\u007f]/u.test(name)
+}
+
+/** 校验分支切换请求。 */
+function switchBranchRequestOf(value: unknown): SwitchBranchRequest | null {
+  const record = recordOf(value)
+  if (record === null || Object.keys(record).length !== 3) return null
+  const path = boundedString(record.path)
+  const repositoryId = boundedString(record.repositoryId, true)
+  const branch = boundedString(record.branch)
+  return path === null || repositoryId === null || branch === null || !isSafeRefName(branch)
+    ? null : { path, repositoryId, branch }
+}
+
 /** 输出无缓存且禁止 MIME 嗅探的 JSON 响应。 */
 function send<T>(res: ServerResponse, status: number, result: ApiResult<T>): void {
   res.statusCode = status
@@ -179,5 +206,17 @@ export function registerRoutes(ctx: Context, service: GitHistoryService): () => 
     syncRequestOf,
     (request, signal) => service.sync(request, signal),
   )
-  return () => { disposeSync(); disposeCommitFile(); disposeCommit(); disposeHistory(); disposeSnapshot() }
+  const disposeBranches = registerRoute<BranchListRequest, BranchListResult>(
+    ctx,
+    BRANCHES_ROUTE,
+    branchListRequestOf,
+    (request, signal) => service.branches(request, signal),
+  )
+  const disposeSwitchBranch = registerRoute<SwitchBranchRequest, SwitchBranchResult>(
+    ctx,
+    SWITCH_BRANCH_ROUTE,
+    switchBranchRequestOf,
+    (request, signal) => service.switchBranch(request, signal),
+  )
+  return () => { disposeSwitchBranch(); disposeBranches(); disposeSync(); disposeCommitFile(); disposeCommit(); disposeHistory(); disposeSnapshot() }
 }

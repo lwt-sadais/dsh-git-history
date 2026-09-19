@@ -67,6 +67,27 @@ export interface SnapshotRequest {
     readonly path: string;
     readonly fetch: boolean;
 }
+export interface BranchListRequest {
+    readonly path: string;
+    readonly repositoryId: string;
+}
+export interface BranchListResult {
+    /** 当前分支名；detached HEAD 时为 null。 */
+    readonly current: string | null;
+    readonly local: readonly string[];
+    /** 远程跟踪短引用（如 origin/feature），已剔除 HEAD 符号引用与本地已有同名分支。 */
+    readonly remote: readonly string[];
+}
+export interface SwitchBranchRequest {
+    readonly path: string;
+    readonly repositoryId: string;
+    /** 目标引用名：本地分支名或远程跟踪短引用。 */
+    readonly branch: string;
+}
+export interface SwitchBranchResult {
+    /** 切换完成后的本地分支名。 */
+    readonly branch: string;
+}
 export interface HistoryRequest {
     readonly path: string;
     readonly repositoryId: string;
@@ -93,7 +114,7 @@ export interface SyncResult {
     readonly pushed: number;
 }
 export interface ApiError {
-    readonly code: 'workspace-unknown' | 'not-git-repository' | 'repository-unknown' | 'commit-unknown' | 'manifest-stale' | 'file-unknown' | 'too-large' | 'invalid-request' | 'internal';
+    readonly code: 'workspace-unknown' | 'not-git-repository' | 'repository-unknown' | 'branch-unknown' | 'commit-unknown' | 'manifest-stale' | 'file-unknown' | 'too-large' | 'invalid-request' | 'internal';
     readonly message: string;
 }
 export type ApiResult<T> = {

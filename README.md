@@ -16,6 +16,7 @@
 - 首次打开 Git History 弹窗时先读取本地状态，再自动执行 `git fetch --prune` 更新远程跟踪引用；入口本身不会触发网络请求。
 - 手动刷新时重新 fetch 根仓库和所有已初始化子模块；单个仓库 fetch 失败不会清空其本地数据。
 - 点击 ahead/behind 数字按钮会按 EnsoAI 的行为同步该仓库：先尝试 fast-forward pull，必要时改用 rebase，再 push。
+- 点击仓座行的分支名会弹出分支菜单，可切换到任意本地分支；目标分支仅在远程存在时，会基于该远程引用创建同名本地跟踪分支并切换；detached HEAD 状态同样可以选择分支附加。工作区存在未提交变更时会先要求确认。
 
 ## 安装
 
@@ -60,7 +61,7 @@ dsh plugin remove --profile desktop dsh-git-history
 - History 只能访问服务端最近一次扫描签发的仓库标识，客户端不能提交任意文件系统路径。
 - Git 通过 DSH `subprocess` 参数数组启动，不经 Shell 拼接。
 - 设置 `GIT_TERMINAL_PROMPT=0` 且每条 Git 命令最多运行 15 秒，避免认证提示或网络请求无限等待。
-- 插件不会执行 checkout 或 reset；仅在用户点击 ahead/behind 数字按钮后执行 pull（必要时 rebase）和 push，自动 fetch 只更新远程跟踪引用。
+- 插件仅在用户于分支菜单中显式选择目标分支（工作区有未提交变更时还需确认）后执行 `git switch` 切换分支；目标分支仅在远程存在时创建同名本地跟踪分支。不会执行 reset、强制切换或丢弃任何本地变更；提交历史与 Diff 只读不变。
 - 本地 API 仅接受当前 DSH 页面发出的回环地址、同源 JSON POST 请求。
 
 ## 本地开发
