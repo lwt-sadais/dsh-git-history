@@ -12,19 +12,22 @@
   - `数字 ↑` 表示本地领先远程跟踪分支的提交数。
   - `数字 ↓` 表示本地落后远程跟踪分支的提交数。
 - 点击根仓库或子模块后，下方切换到对应仓库的 Git History。
-- History 显示提交标题、作者、相对时间、短 Hash、分支和标签引用，并支持分页加载。
+- History 显示提交标题、作者、相对时间、短 Hash、分支和标签引用，并支持分页加载（每页 20 条）。
+- 点击提交条目可查看该提交的改动：左侧列出改动文件（新增/修改/删除/重命名，重命名显示 `旧路径 → 新路径`），右侧以“修改前/修改后”双栏展示按行对齐的差异，支持大文件虚拟滚动与双栏滚动同步；点击右侧的差异标记可平滑定位到对应改动行。合并提交相对第一父提交比较，根提交按新增全部文件展示。
 - 首次打开 Git History 弹窗时先读取本地状态，再自动执行 `git fetch --prune` 更新远程跟踪引用；入口本身不会触发网络请求。
 - 手动刷新时重新 fetch 根仓库和所有已初始化子模块；单个仓库 fetch 失败不会清空其本地数据。
 - 点击 ahead/behind 数字按钮会按 EnsoAI 的行为同步该仓库：先尝试 fast-forward pull，必要时改用 rebase，再 push。
-- 点击仓座行的分支名会弹出分支菜单，可切换到任意本地分支；目标分支仅在远程存在时，会基于该远程引用创建同名本地跟踪分支并切换；detached HEAD 状态同样可以选择分支附加。工作区存在未提交变更时会先要求确认。
+- 点击仓座行的分支名会弹出分支菜单，按“本地分支 / 远程分支”分组列出并支持方向键导航，可切换到任意本地分支；目标分支仅在远程存在时，会基于该远程引用创建同名本地跟踪分支并切换；detached HEAD 状态同样可以选择分支附加。工作区存在未提交变更时会先要求确认。
 
 ## 安装
 
-必须安装到 DSH Desktop 使用的 `desktop` Profile：
+必须安装到 DSH Desktop 使用的 `desktop` Profile。推荐在 `github:` 源后附加完整的 40 位提交哈希，把安装锚定到具体提交，避免默认分支后续变动影响安装结果：
 
 ```bash
-dsh plugin add --profile desktop github:lwt-sadais/dsh-git-history
+dsh plugin add --profile desktop github:lwt-sadais/dsh-git-history#b0f88d6b1ed53874767ee22f57c176e049762b90
 ```
+
+上述哈希对应本 README 更新时的 HEAD 提交 `b0f88d6`（✨ feat(history): 支持点击分支名切换分支）。更新到新版本时，先用 `git ls-remote https://github.com/lwt-sadais/dsh-git-history.git HEAD` 或仓库页面获取最新提交哈希，再替换 `#` 后的值。
 
 也可以安装本地源码目录或打包产物：
 
@@ -49,7 +52,8 @@ dsh plugin remove --profile desktop dsh-git-history
 2. 点击聊天输入框工具栏中的 **Git History**。
 3. 在弹窗仓库树中选择根仓库或任意已初始化子模块。
 4. 在右侧查看对应仓库的提交历史；需要更多记录时点击“加载更多”。
-5. 点击“刷新并 Fetch”可重新更新远程跟踪引用和 ahead/behind 数值。
+5. 点击任意提交可查看该提交的改动文件与双栏差异，点击差异标记可定位改动行。
+6. 点击“刷新并 Fetch”可重新更新远程跟踪引用和 ahead/behind 数值。
 
 没有 upstream 的仓库仍会显示分支和历史，但不会显示 ahead/behind。Detached HEAD 显示为 `detached@<短哈希>`；未初始化子模块只显示名称和“未初始化”状态。
 
@@ -59,6 +63,8 @@ dsh plugin remove --profile desktop dsh-git-history
 - 宿主端会再次使用 DSH Workspace Registry 校验路径，并要求工作区本身就是 Git 根目录。
 - 子模块路径只从仓库 `.gitmodules` 读取，并校验解析后的真实路径仍在父仓库内。
 - History 只能访问服务端最近一次扫描签发的仓库标识，客户端不能提交任意文件系统路径。
+- 提交改动同样只读：提交哈希必须为 40/64 位十六进制并经服务端验证属于该仓库；文件差异凭服务端签发的短期清单按需读取（清单 5 分钟内有效，同时最多保留 8 份），客户端无法凭任意路径或哈希取得文件内容。
+- 单文件两侧内容合计超过 16 MiB 时拒绝读取；超过 2 MiB 时仅截取前 2 MiB 展示；二进制文件不输出文本差异。
 - Git 通过 DSH `subprocess` 参数数组启动，不经 Shell 拼接。
 - 设置 `GIT_TERMINAL_PROMPT=0` 且每条 Git 命令最多运行 15 秒，避免认证提示或网络请求无限等待。
 - 插件仅在用户于分支菜单中显式选择目标分支（工作区有未提交变更时还需确认）后执行 `git switch` 切换分支；目标分支仅在远程存在时创建同名本地跟踪分支。不会执行 reset、强制切换或丢弃任何本地变更；提交历史与 Diff 只读不变。
@@ -66,7 +72,7 @@ dsh plugin remove --profile desktop dsh-git-history
 
 ## 本地开发
 
-环境要求：Node.js 22.19+、pnpm。
+环境要求：Node.js ^22.19.0 或 >=24.0.0、pnpm。
 
 ```bash
 pnpm install
@@ -81,14 +87,17 @@ pnpm pack
 ```text
 src/
 ├── core/types.ts             # Host 与 Client 共用的数据契约
-├── host/git-service.ts       # Git 执行、工作区校验、递归扫描与 History
+├── host/git-service.ts       # Git 执行、工作区校验、递归扫描、History 与提交差异
 ├── host/routes.ts            # 同源本地 API
-├── client/GitHistoryView.tsx # 仓库树和提交历史界面
+├── client/GitHistoryView.tsx # 仓库树、提交历史与提交差异界面
 ├── client/api.ts             # Client API
 ├── client/locales.ts         # 中英文文案
 ├── client/styles.css         # DSH 主题样式
+├── client/css-modules.d.ts   # CSS 内联导入的类型声明
 ├── client/index.ts           # conversation.input.left 工具栏注册
 └── index.ts                  # Host 插件入口
+tests/
+└── git-service.test.ts       # Git 输出解析与服务行为的单元测试
 ```
 
 ## 致谢与许可
