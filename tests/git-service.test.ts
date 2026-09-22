@@ -1,6 +1,6 @@
 import { realpath } from 'node:fs/promises'
 import { describe, expect, it } from 'vitest'
-import { alignDiff, filterRemoteBranches, GitHistoryService, parseAheadBehind, parseBranchRefs, parseChangeCount, parseCommitFiles, parseHistory, parseSubmodulePaths, splitRemoteRef } from '../src/host/git-service.js'
+import { alignDiff, filterRemoteBranches, GitHistoryService, parseAheadBehind, parseBranchRefs, parseChangeCount, parseCommitFiles, parseHistory, parseLocalBranchRefs, parseSubmodulePaths, splitRemoteRef } from '../src/host/git-service.js'
 
 /** 构造与宿主 git log 格式一致的一条测试记录。 */
 function historyRecord(fields: readonly string[]): string {
@@ -209,6 +209,11 @@ describe('Git 同步', () => {
 describe('Git 分支', () => {
   it('解析 for-each-ref 短引用，并过滤 HEAD 与本地同名远程分支', () => {
     expect(parseBranchRefs('main\nfeature/one\r\n\n')).toEqual(['main', 'feature/one'])
+    expect(parseLocalBranchRefs('main\t\ntopic\t[gone]\ndev\t[ahead 1]\n\n')).toEqual([
+      { name: 'main', gone: false },
+      { name: 'topic', gone: true },
+      { name: 'dev', gone: false },
+    ])
     const remoteNames = ['origin', 'upstream']
     expect(splitRemoteRef(remoteNames, 'origin/feature/one')).toBe('feature/one')
     expect(splitRemoteRef(remoteNames, 'origin/HEAD')).toBe('HEAD')
@@ -224,7 +229,7 @@ describe('Git 分支', () => {
         const command = argv.join(' ')
         if (command === 'rev-parse --show-toplevel') return { exitCode: 0, stdout: `${root}\n`, stderr: '' }
         if (command === 'symbolic-ref --quiet --short HEAD') return { exitCode: 1, stdout: '', stderr: '' }
-        if (command === 'for-each-ref refs/heads --format=%(refname:short)') return { exitCode: 0, stdout: 'main\ntopic\n', stderr: '' }
+        if (command === 'for-each-ref refs/heads --format=%(refname:short)%09%(upstream:track)') return { exitCode: 0, stdout: 'main\t\ntopic\t\n', stderr: '' }
         if (command === 'for-each-ref refs/remotes --format=%(refname:short)') return { exitCode: 0, stdout: 'origin/HEAD\norigin/main\norigin/feature/one\n', stderr: '' }
         if (command === 'remote') return { exitCode: 0, stdout: 'origin\n', stderr: '' }
         return { exitCode: 0, stdout: '', stderr: '' }
@@ -250,7 +255,7 @@ describe('Git 分支', () => {
         const command = argv.join(' ')
         if (command === 'rev-parse --show-toplevel') return { exitCode: 0, stdout: `${root}\n`, stderr: '' }
         if (command === 'symbolic-ref --quiet --short HEAD') return { exitCode: 0, stdout: 'main\n', stderr: '' }
-        if (command === 'for-each-ref refs/heads --format=%(refname:short)') return { exitCode: 0, stdout: 'main\n', stderr: '' }
+        if (command === 'for-each-ref refs/heads --format=%(refname:short)%09%(upstream:track)') return { exitCode: 0, stdout: 'main\t\n', stderr: '' }
         if (command === 'for-each-ref refs/remotes --format=%(refname:short)') {
           return { exitCode: 0, stdout: `origin/main\n${remoteHasStale ? 'origin/stale\n' : ''}`, stderr: '' }
         }
@@ -284,6 +289,37 @@ describe('Git 分支', () => {
     expect(calls[0]).toEqual(['fetch', '--prune'])
   })
 
+  it('上游已删除（gone）的本地分支不进下拉列表，但切换校验仍接受', async () => {
+    const root = await realpath(process.cwd())
+    const calls: string[][] = []
+    const runner = {
+      async run(argv: readonly string[]) {
+        calls.push([...argv])
+        const command = argv.join(' ')
+        if (command === 'rev-parse --show-toplevel') return { exitCode: 0, stdout: `${root}\n`, stderr: '' }
+        if (command === 'symbolic-ref --quiet --short HEAD') return { exitCode: 0, stdout: 'main\n', stderr: '' }
+        if (command === 'for-each-ref refs/heads --format=%(refname:short)%09%(upstream:track)') return { exitCode: 0, stdout: 'main\t\nstale\t[gone]\n', stderr: '' }
+        if (command === 'for-each-ref refs/remotes --format=%(refname:short)') return { exitCode: 0, stdout: 'origin/HEAD\norigin/main\norigin/stale\n', stderr: '' }
+        if (command === 'remote') return { exitCode: 0, stdout: 'origin\n', stderr: '' }
+        return { exitCode: 0, stdout: '', stderr: '' }
+      },
+    }
+    const service = new GitHistoryService(runner, { async resolve() { return { ok: true, value: root } } })
+    await service.snapshot(root, false)
+
+    // stale 的远程分支已被删除：本地 stale 隐藏；即使 prune 失败残留 origin/stale，也因本地同名而不在远程组重现。
+    await expect(service.branches({ path: root, repositoryId: '' })).resolves.toEqual({
+      ok: true,
+      value: { current: 'main', local: ['main'], remote: [] },
+    })
+
+    await expect(service.switchBranch({ path: root, repositoryId: '', branch: 'stale' })).resolves.toEqual({
+      ok: true,
+      value: { branch: 'stale' },
+    })
+    expect(calls.at(-1)).toEqual(['switch', 'stale'])
+  })
+
   it('切换本地分支与基于远程引用创建跟踪分支', async () => {
     const root = await realpath(process.cwd())
     const calls: string[][] = []
@@ -293,7 +329,7 @@ describe('Git 分支', () => {
         const command = argv.join(' ')
         if (command === 'rev-parse --show-toplevel') return { exitCode: 0, stdout: `${root}\n`, stderr: '' }
         if (command === 'symbolic-ref --quiet --short HEAD') return { exitCode: 0, stdout: 'main\n', stderr: '' }
-        if (command === 'for-each-ref refs/heads --format=%(refname:short)') return { exitCode: 0, stdout: 'main\ntopic\n', stderr: '' }
+        if (command === 'for-each-ref refs/heads --format=%(refname:short)%09%(upstream:track)') return { exitCode: 0, stdout: 'main\t\ntopic\t\n', stderr: '' }
         if (command === 'for-each-ref refs/remotes --format=%(refname:short)') return { exitCode: 0, stdout: 'origin/HEAD\norigin/main\norigin/next\n', stderr: '' }
         if (command === 'remote') return { exitCode: 0, stdout: 'origin\n', stderr: '' }
         return { exitCode: 0, stdout: '', stderr: '' }
@@ -323,7 +359,7 @@ describe('Git 分支', () => {
         const command = argv.join(' ')
         if (command === 'rev-parse --show-toplevel') return { exitCode: 0, stdout: `${root}\n`, stderr: '' }
         if (command === 'symbolic-ref --quiet --short HEAD') return { exitCode: 0, stdout: 'main\n', stderr: '' }
-        if (command === 'for-each-ref refs/heads --format=%(refname:short)') return { exitCode: 0, stdout: 'main\n', stderr: '' }
+        if (command === 'for-each-ref refs/heads --format=%(refname:short)%09%(upstream:track)') return { exitCode: 0, stdout: 'main\t\n', stderr: '' }
         if (command === 'for-each-ref refs/remotes --format=%(refname:short)') return { exitCode: 0, stdout: 'origin/HEAD\norigin/main\n', stderr: '' }
         if (command === 'remote') return { exitCode: 0, stdout: 'origin\n', stderr: '' }
         return { exitCode: 0, stdout: '', stderr: '' }
@@ -354,7 +390,7 @@ describe('Git 分支', () => {
         const command = argv.join(' ')
         if (command === 'rev-parse --show-toplevel') return { exitCode: 0, stdout: `${root}\n`, stderr: '' }
         if (command === 'symbolic-ref --quiet --short HEAD') return { exitCode: 0, stdout: 'main\n', stderr: '' }
-        if (command === 'for-each-ref refs/heads --format=%(refname:short)') return { exitCode: 0, stdout: 'main\ntopic\n', stderr: '' }
+        if (command === 'for-each-ref refs/heads --format=%(refname:short)%09%(upstream:track)') return { exitCode: 0, stdout: 'main\t\ntopic\t\n', stderr: '' }
         if (command === 'switch topic') return {
           exitCode: 1,
           stdout: '',

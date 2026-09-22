@@ -164,7 +164,7 @@ declare class GitHistoryService {
   constructor(runner: GitRunner, gate: WorkspaceGate);
   /** 校验工作区路径并解析服务端最近一次扫描签发的仓库根目录。 */
   private resolveRepository;
-  /** 枚举本地分支、远程跟踪引用、远程名和当前分支，供分支列表与切换校验复用。 */
+  /** 枚举本地分支（含上游删除状态）、远程跟踪引用、远程名和当前分支，供分支列表与切换校验复用。 */
   private readRefs;
   /** 探测仓库当前分支、跟踪分支、同步计数和本地未提交变更数。 */
   private readIdentity;
@@ -188,7 +188,7 @@ declare class GitHistoryService {
   commitFile(request: CommitFileRequest, signal?: AbortSignal): Promise<ApiResult<CommitFile>>;
   /** 按 EnsoAI 的同步顺序先拉取落后提交，再推送本地领先提交。 */
   sync(request: SyncRequest, signal?: AbortSignal): Promise<ApiResult<SyncResult>>;
-  /** 枚举仓库的本地与远程分支；列举前先尽力 fetch --prune 清掉远端已删分支的过期跟踪引用，detached HEAD 时 current 为 null。 */
+  /** 枚举仓库的本地与远程分支；列举前先尽力 fetch --prune 清掉远端已删分支的过期跟踪引用，并隐藏上游已删除的本地分支；detached HEAD 时 current 为 null。 */
   branches(request: BranchListRequest, signal?: AbortSignal): Promise<ApiResult<BranchListResult>>;
   /** 切换到本地分支，或基于远程引用创建同名跟踪分支后切换；引用名必须命中服务端重新枚举的结果。 */
   switchBranch(request: SwitchBranchRequest, signal?: AbortSignal): Promise<ApiResult<SwitchBranchResult>>;

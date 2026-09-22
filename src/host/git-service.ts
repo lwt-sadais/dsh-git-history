@@ -225,6 +225,23 @@ export function parseBranchRefs(stdout: string): string[] {
   return stdout.split(/\r?\n/u).map(line => line.trim()).filter(line => line !== '')
 }
 
+/** 本地分支引用及其上游状态；gone 表示跟踪的远程分支已在远端删除。 */
+export interface LocalBranchRef {
+  readonly name: string
+  readonly gone: boolean
+}
+
+/** 解析带上游跟踪状态的本地分支行输出（refname 与 track 以制表符分隔），识别上游已删除（[gone]）的分支。 */
+export function parseLocalBranchRefs(stdout: string): LocalBranchRef[] {
+  return stdout.split(/\r?\n/u).flatMap(line => {
+    const separator = line.indexOf('\t')
+    const name = (separator < 0 ? line : line.slice(0, separator)).trim()
+    if (name === '') return []
+    const track = separator < 0 ? '' : line.slice(separator + 1).trim()
+    return [{ name, gone: track.startsWith('[gone]') }]
+  })
+}
+
 /** 将远程跟踪短引用按已知远程名切分为目标本地分支短名，取最长匹配的远程名。 */
 export function splitRemoteRef(remoteNames: readonly string[], ref: string): string | null {
   let matchedLength = 0
@@ -269,14 +286,14 @@ export class GitHistoryService {
       : { ok: true, value: root }
   }
 
-  /** 枚举本地分支、远程跟踪引用、远程名和当前分支，供分支列表与切换校验复用。 */
+  /** 枚举本地分支（含上游删除状态）、远程跟踪引用、远程名和当前分支，供分支列表与切换校验复用。 */
   private async readRefs(root: string, signal?: AbortSignal): Promise<ApiResult<{
     current: string | null
-    local: string[]
+    localBranches: LocalBranchRef[]
     remoteRefs: string[]
     remoteNames: string[]
   }>> {
-    const localResult = await this.runner.run(['for-each-ref', 'refs/heads', '--format=%(refname:short)'], root, signal)
+    const localResult = await this.runner.run(['for-each-ref', 'refs/heads', '--format=%(refname:short)%09%(upstream:track)'], root, signal)
     if (localResult.exitCode !== 0) return fail('internal', 'unable to read Git branches')
     const remoteResult = await this.runner.run(['for-each-ref', 'refs/remotes', '--format=%(refname:short)'], root, signal)
     const remoteNamesResult = await this.runner.run(['remote'], root, signal)
@@ -285,7 +302,7 @@ export class GitHistoryService {
       ok: true,
       value: {
         current: headResult.exitCode === 0 ? firstLine(headResult.stdout) : null,
-        local: parseBranchRefs(localResult.stdout),
+        localBranches: parseLocalBranchRefs(localResult.stdout),
         remoteRefs: remoteResult.exitCode === 0 ? parseBranchRefs(remoteResult.stdout) : [],
         remoteNames: remoteNamesResult.exitCode === 0 ? parseBranchRefs(remoteNamesResult.stdout) : [],
       },
@@ -523,7 +540,7 @@ export class GitHistoryService {
     return { ok: true, value: { branch: identity.branch, pulled: identity.behind, pushed: identity.ahead } }
   }
 
-  /** 枚举仓库的本地与远程分支；列举前先尽力 fetch --prune 清掉远端已删分支的过期跟踪引用，detached HEAD 时 current 为 null。 */
+  /** 枚举仓库的本地与远程分支；列举前先尽力 fetch --prune 清掉远端已删分支的过期跟踪引用，并隐藏上游已删除的本地分支；detached HEAD 时 current 为 null。 */
   async branches(request: BranchListRequest, signal?: AbortSignal): Promise<ApiResult<BranchListResult>> {
     const resolved = await this.resolveRepository(request.path, request.repositoryId)
     if (!resolved.ok) return resolved
@@ -531,12 +548,15 @@ export class GitHistoryService {
     await this.fetch(resolved.value, signal)
     const refs = await this.readRefs(resolved.value, signal)
     if (!refs.ok) return refs
+    const locals = refs.value.localBranches.map(branch => branch.name)
     return {
       ok: true,
       value: {
         current: refs.value.current,
-        local: refs.value.local,
-        remote: filterRemoteBranches(refs.value.remoteNames, refs.value.remoteRefs, refs.value.local),
+        // 上游已删除（[gone]）的本地分支与本地不存在同样不进下拉列表，避免误导切换；手动 switch 的服务端校验仍接受它们。
+        local: refs.value.localBranches.filter(branch => !branch.gone).map(branch => branch.name),
+        // 远程组过滤使用包含 gone 的全量本地名，保证 prune 失败时残留的同名远程项也不会重现。
+        remote: filterRemoteBranches(refs.value.remoteNames, refs.value.remoteRefs, locals),
       },
     }
   }
@@ -548,7 +568,8 @@ export class GitHistoryService {
     const root = resolved.value
     const refs = await this.readRefs(root, signal)
     if (!refs.ok) return refs
-    const { local, remoteRefs, remoteNames } = refs.value
+    const { localBranches, remoteRefs, remoteNames } = refs.value
+    const local = localBranches.map(branch => branch.name)
     if (local.includes(request.branch)) {
       const switched = await this.runner.run(['switch', request.branch], root, signal)
       return switched.exitCode === 0
