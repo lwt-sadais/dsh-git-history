@@ -188,7 +188,7 @@ declare class GitHistoryService {
   commitFile(request: CommitFileRequest, signal?: AbortSignal): Promise<ApiResult<CommitFile>>;
   /** 按 EnsoAI 的同步顺序先拉取落后提交，再推送本地领先提交。 */
   sync(request: SyncRequest, signal?: AbortSignal): Promise<ApiResult<SyncResult>>;
-  /** 枚举仓库的本地与远程分支；远程组剔除 HEAD 符号引用与本地同名分支，detached HEAD 时 current 为 null。 */
+  /** 枚举仓库的本地与远程分支；列举前先尽力 fetch --prune 清掉远端已删分支的过期跟踪引用，detached HEAD 时 current 为 null。 */
   branches(request: BranchListRequest, signal?: AbortSignal): Promise<ApiResult<BranchListResult>>;
   /** 切换到本地分支，或基于远程引用创建同名跟踪分支后切换；引用名必须命中服务端重新枚举的结果。 */
   switchBranch(request: SwitchBranchRequest, signal?: AbortSignal): Promise<ApiResult<SwitchBranchResult>>;

@@ -523,10 +523,12 @@ export class GitHistoryService {
     return { ok: true, value: { branch: identity.branch, pulled: identity.behind, pushed: identity.ahead } }
   }
 
-  /** 枚举仓库的本地与远程分支；远程组剔除 HEAD 符号引用与本地同名分支，detached HEAD 时 current 为 null。 */
+  /** 枚举仓库的本地与远程分支；列举前先尽力 fetch --prune 清掉远端已删分支的过期跟踪引用，detached HEAD 时 current 为 null。 */
   async branches(request: BranchListRequest, signal?: AbortSignal): Promise<ApiResult<BranchListResult>> {
     const resolved = await this.resolveRepository(request.path, request.repositoryId)
     if (!resolved.ok) return resolved
+    // 过期远程跟踪引用会以"远端已删+本地已删"的分支形态残留在下拉列表里；fetch 失败（离线或无凭据）时忽略并退回本地引用。
+    await this.fetch(resolved.value, signal)
     const refs = await this.readRefs(resolved.value, signal)
     if (!refs.ok) return refs
     return {

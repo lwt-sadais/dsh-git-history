@@ -239,6 +239,51 @@ describe('Git 分支', () => {
     })
   })
 
+  it('列举分支前先 fetch --prune 清理远端已删分支，fetch 失败时退回本地引用', async () => {
+    const root = await realpath(process.cwd())
+    const calls: string[][] = []
+    let remoteHasStale = true
+    let pruneWorks = true
+    const runner = {
+      async run(argv: readonly string[]) {
+        calls.push([...argv])
+        const command = argv.join(' ')
+        if (command === 'rev-parse --show-toplevel') return { exitCode: 0, stdout: `${root}\n`, stderr: '' }
+        if (command === 'symbolic-ref --quiet --short HEAD') return { exitCode: 0, stdout: 'main\n', stderr: '' }
+        if (command === 'for-each-ref refs/heads --format=%(refname:short)') return { exitCode: 0, stdout: 'main\n', stderr: '' }
+        if (command === 'for-each-ref refs/remotes --format=%(refname:short)') {
+          return { exitCode: 0, stdout: `origin/main\n${remoteHasStale ? 'origin/stale\n' : ''}`, stderr: '' }
+        }
+        if (command === 'remote') return { exitCode: 0, stdout: 'origin\n', stderr: '' }
+        if (command === 'fetch --prune') {
+          // prune 成功即清掉远端已删分支的跟踪引用；失败时引用保持过期状态。
+          if (pruneWorks) remoteHasStale = false
+          return pruneWorks ? { exitCode: 0, stdout: '', stderr: '' } : { exitCode: 1, stdout: '', stderr: 'fatal: unable to access\n' }
+        }
+        return { exitCode: 0, stdout: '', stderr: '' }
+      },
+    }
+    const service = new GitHistoryService(runner, { async resolve() { return { ok: true, value: root } } })
+    await service.snapshot(root, false)
+    calls.length = 0
+
+    await expect(service.branches({ path: root, repositoryId: '' })).resolves.toEqual({
+      ok: true,
+      value: { current: 'main', local: ['main'], remote: [] },
+    })
+    expect(calls[0]).toEqual(['fetch', '--prune'])
+
+    // 远端分支再次被删且网络不可用时，过期引用退化为照常返回，不阻塞列表。
+    remoteHasStale = true
+    pruneWorks = false
+    calls.length = 0
+    await expect(service.branches({ path: root, repositoryId: '' })).resolves.toEqual({
+      ok: true,
+      value: { current: 'main', local: ['main'], remote: ['origin/stale'] },
+    })
+    expect(calls[0]).toEqual(['fetch', '--prune'])
+  })
+
   it('切换本地分支与基于远程引用创建跟踪分支', async () => {
     const root = await realpath(process.cwd())
     const calls: string[][] = []
