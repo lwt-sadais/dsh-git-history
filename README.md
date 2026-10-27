@@ -68,7 +68,7 @@ dsh plugin remove --profile desktop dsh-git-history
 - Git 通过 DSH `subprocess` 参数数组启动，不经 Shell 拼接。
 - 设置 `GIT_TERMINAL_PROMPT=0` 且每条 Git 命令最多运行 15 秒，避免认证提示或网络请求无限等待。
 - 插件仅在用户于分支菜单中显式选择目标分支（工作区有未提交变更时还需确认）后执行 `git switch` 切换分支；目标分支仅在远程存在时创建同名本地跟踪分支。不会执行 reset、强制切换或丢弃任何本地变更；提交历史与 Diff 只读不变。
-- 本地 API 仅接受当前 DSH 页面发出的回环地址、同源 JSON POST 请求。
+- 本地 API 仅接受本机回环地址发出的 JSON POST 请求。浏览器直连时要求 `Origin` 与 `Host` 同源；DSH Desktop 通过 `dsh-app://app` 代理并剥离 `Origin`/`Host`，此时以“回环地址 + JSON”判定。
 
 ## 本地开发
 
