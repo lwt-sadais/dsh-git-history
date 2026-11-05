@@ -132,6 +132,20 @@ export interface SyncResult {
   readonly branch: string | null
   readonly pulled: number
   readonly pushed: number
+  /**
+   * 同步后的最新上游状态。
+   * 客户端据此只替换该仓库节点，避免为更新两个数字而重扫整棵仓库树；缺省时客户端退回全量刷新。
+   */
+  readonly identity?: SyncIdentity
+}
+
+/** 一次身份探测的结果，与 RepositoryNode 的同名字段一一对应。 */
+export interface SyncIdentity {
+  readonly branch: string | null
+  readonly tracking: string | null
+  readonly ahead: number
+  readonly behind: number
+  readonly changes: number
 }
 
 export interface ApiError {

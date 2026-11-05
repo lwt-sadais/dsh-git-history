@@ -29,7 +29,14 @@ import type {
 const MAX_REPOSITORIES = 128
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 const MAX_ERROR_BYTES = 256 * 1024
-const COMMAND_TIMEOUT_MS = 15_000
+/** 只读本地命令的超时；远端命令见 NETWORK_TIMEOUT_MS。 */
+const LOCAL_TIMEOUT_MS = 15_000
+/** 需要访问远端的命令超时：慢网下 push/pull 常超过 15s，过紧会把成功误判为失败。 */
+const NETWORK_TIMEOUT_MS = 60_000
+/** 会访问远端的命令名；命中时使用放宽后的超时。 */
+const NETWORK_COMMANDS = new Set(['fetch', 'pull', 'push', 'clone', 'ls-remote'])
+/** 子模块扫描并发上限：Windows 进程创建成本高，4 在并行收益与冷启动尖峰之间折中，两平台同值。 */
+const SCAN_CONCURRENCY = 4
 const FIELD_SEPARATOR = '\u001f'
 const RECORD_SEPARATOR = '\u001e'
 const MAX_FILE_BYTES = 2 * 1024 * 1024
@@ -69,6 +76,9 @@ interface ScanBudget {
   repositories: number
 }
 
+/** 一个仓库的身份信息：除标识、名称、初始化状态与子节点之外的仓库节点字段。 */
+type RepositoryIdentity = Omit<RepositoryNode, 'id' | 'name' | 'path' | 'initialized' | 'fetchError' | 'children'>
+
 /** 构造稳定的 API 失败结果，避免各调用点重复拼装错误结构。 */
 function fail(code: ApiError['code'], message: string): ApiResult<never> {
   return { ok: false, error: { code, message } }
@@ -103,6 +113,21 @@ function safeChild(root: string, path: string): string | null {
 /** 拼接工作区相对的仓库标识，根仓库固定使用空字符串。 */
 function childId(parentId: string, childPath: string): string {
   return parentId === '' ? childPath : `${parentId}/${childPath}`
+}
+
+/** 以固定并发上限映射异步任务，结果顺序与输入一致；用于把串行的子模块扫描压成并行。 */
+export async function mapLimit<T, R>(items: readonly T[], limit: number, task: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length)
+  let cursor = 0
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor
+      cursor += 1
+      results[index] = await task(items[index]!)
+    }
+  })
+  await Promise.all(workers)
+  return results
 }
 
 /** 将文本拆为稳定的逻辑行，同时忽略末尾换行产生的空记录。 */
@@ -199,6 +224,32 @@ export function parseAheadBehind(stdout: string): { ahead: number, behind: numbe
 /** 统计 status --porcelain=v2 行式输出中的变更条目数；`#` 表头与 `!` 忽略项不计，重命名条目单行只计 1 次。 */
 export function parseChangeCount(stdout: string): number {
   return stdout.split(/\r?\n/u).filter(line => /^[12u?] /u.test(line)).length
+}
+
+/** 从 porcelain=v2 的 `# branch.*` 头行解析分支短名、上游与领先/落后计数。 */
+export function parseStatusHeaders(stdout: string): {
+  readonly head: string | null
+  readonly upstream: string | null
+  readonly ahead: number
+  readonly behind: number
+  readonly hasAheadBehind: boolean
+} {
+  let head: string | null = null
+  let upstream: string | null = null
+  let ahead = 0
+  let behind = 0
+  let hasAheadBehind = false
+  for (const line of stdout.split(/\r?\n/u)) {
+    if (line.startsWith('# branch.head ')) head = line.slice('# branch.head '.length).trim()
+    else if (line.startsWith('# branch.upstream ')) upstream = line.slice('# branch.upstream '.length).trim()
+    else if (line.startsWith('# branch.ab ')) {
+      hasAheadBehind = true
+      const [, left, right] = /\+(\d+)\s+-(\d+)/u.exec(line) ?? []
+      ahead = Number.parseInt(left ?? '0', 10) || 0
+      behind = Number.parseInt(right ?? '0', 10) || 0
+    }
+  }
+  return { head: head === '(detached)' ? null : head, upstream, ahead, behind, hasAheadBehind }
 }
 
 /** 解析使用不可见分隔符输出的 Git 日志，避免提交文本中的常见字符破坏字段。 */
@@ -309,8 +360,35 @@ export class GitHistoryService {
     }
   }
 
-  /** 探测仓库当前分支、跟踪分支、同步计数和本地未提交变更数。 */
-  private async readIdentity(root: string, signal?: AbortSignal): Promise<Omit<RepositoryNode, 'id' | 'name' | 'path' | 'initialized' | 'fetchError' | 'children'>> {
+  /**
+   * 探测仓库当前分支、跟踪分支、同步计数和本地未提交变更数。
+   * porcelain=v2 的 `# branch.*` 头已含分支、上游与领先/落后计数，一次 status 即可取全，
+   * 省掉原先 5 次独立子进程；detached HEAD 仍补一次 rev-parse，保持「detached@短哈希」口径不变。
+   */
+  private async readIdentity(root: string, signal?: AbortSignal): Promise<RepositoryIdentity> {
+    const statusResult = await this.runner.run(['status', '--porcelain=v2', '--branch', '--untracked-files=all'], root, signal)
+    if (statusResult.exitCode !== 0) return this.readIdentityFallback(root, signal)
+    const headers = parseStatusHeaders(statusResult.stdout)
+    let branch = headers.head
+    if (branch === null) {
+      const head = await this.runner.run(['rev-parse', '--short', 'HEAD'], root, signal)
+      const shortHash = head.exitCode === 0 ? firstLine(head.stdout) : null
+      branch = shortHash === null ? null : `detached@${shortHash}`
+    }
+    // 上游已配置但远程跟踪引用已消失时，porcelain=v2 只输出 branch.upstream、不输出 branch.ab；
+    // 旧实现的 rev-parse @{upstream} 在该场景同样失败，两者都应判定为「无上游」。
+    const tracking = headers.upstream !== null && headers.hasAheadBehind ? headers.upstream : null
+    return {
+      branch,
+      tracking,
+      ahead: tracking === null ? 0 : headers.ahead,
+      behind: tracking === null ? 0 : headers.behind,
+      changes: parseChangeCount(statusResult.stdout),
+    }
+  }
+
+  /** status 不可用（超时被杀、仓库损坏）时退回逐条探测，保证异常路径与原实现给出相同的身份数据。 */
+  private async readIdentityFallback(root: string, signal?: AbortSignal): Promise<RepositoryIdentity> {
     const branchResult = await this.runner.run(['symbolic-ref', '--quiet', '--short', 'HEAD'], root, signal)
     let branch = branchResult.exitCode === 0 ? firstLine(branchResult.stdout) : null
     if (branch === null) {
@@ -320,12 +398,10 @@ export class GitHistoryService {
     }
     const upstreamResult = await this.runner.run(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'], root, signal)
     const tracking = upstreamResult.exitCode === 0 ? firstLine(upstreamResult.stdout) : null
-    const statusResult = await this.runner.run(['status', '--porcelain=v2', '--untracked-files=all'], root, signal)
-    const changes = statusResult.exitCode === 0 ? parseChangeCount(statusResult.stdout) : 0
-    if (tracking === null) return { branch, tracking: null, ahead: 0, behind: 0, changes }
+    if (tracking === null) return { branch, tracking: null, ahead: 0, behind: 0, changes: 0 }
     const countResult = await this.runner.run(['rev-list', '--left-right', '--count', 'HEAD...@{upstream}'], root, signal)
     const counts = countResult.exitCode === 0 ? parseAheadBehind(countResult.stdout) : { ahead: 0, behind: 0 }
-    return { branch, tracking, ...counts, changes }
+    return { branch, tracking, ...counts, changes: 0 }
   }
 
   /** 在明确请求时更新远程跟踪引用；失败仅记录在对应仓库节点上。 */
@@ -354,7 +430,10 @@ export class GitHistoryService {
     return pull.exitCode === 0 ? this.runner.run(['push'], root, signal) : pull
   }
 
-  /** 递归扫描一个已初始化仓库，并建立仅供当前工作区使用的仓库路径清单。 */
+  /**
+   * 递归扫描一个已初始化仓库，并建立仅供当前工作区使用的仓库路径清单。
+   * concurrency 控制本级子模块的并发宽度；递归到下一层时固定降为 1，避免 4^depth 的进程风暴。
+   */
   private async scanRepository(
     root: string,
     id: string,
@@ -362,6 +441,7 @@ export class GitHistoryService {
     budget: ScanBudget,
     identities: Map<string, string>,
     signal?: AbortSignal,
+    concurrency = SCAN_CONCURRENCY,
   ): Promise<RepositoryNode> {
     signal?.throwIfAborted()
     budget.repositories += 1
@@ -371,10 +451,11 @@ export class GitHistoryService {
     const identity = await this.readIdentity(root, signal)
     const modules = await this.runner.run(['config', '--file', '.gitmodules', '--get-regexp', '^submodule\\..*\\.path$'], root, signal)
     const declaredPaths = modules.exitCode === 0 ? parseSubmodulePaths(modules.stdout) : []
-    const children: RepositoryNode[] = []
-    for (const path of declaredPaths) {
+    // 并发扫描下「第几个节点触发上限」不固定，但结果仍是整次失败，与串行实现同为 MAX_REPOSITORIES 保护；
+    // 结果按下标写回，子模块的展示顺序仍严格等于 .gitmodules 的声明顺序。
+    const scanned = await mapLimit(declaredPaths, concurrency, async path => {
       const childRoot = safeChild(root, path)
-      if (childRoot === null) continue
+      if (childRoot === null) return null
       const childRepositoryId = childId(id, path)
       let initialized = false
       try {
@@ -385,24 +466,22 @@ export class GitHistoryService {
         // 未检出的目录或尚未初始化的 gitlink 仍作为禁用节点展示。
         initialized = false
       }
-      if (initialized) {
-        children.push(await this.scanRepository(childRoot, childRepositoryId, shouldFetch, budget, identities, signal))
-      } else {
-        children.push({
-          id: childRepositoryId,
-          name: basename(path),
-          path: childRepositoryId,
-          initialized: false,
-          branch: null,
-          tracking: null,
-          ahead: 0,
-          behind: 0,
-          changes: 0,
-          fetchError: null,
-          children: [],
-        })
+      if (initialized) return this.scanRepository(childRoot, childRepositoryId, shouldFetch, budget, identities, signal, 1)
+      return {
+        id: childRepositoryId,
+        name: basename(path),
+        path: childRepositoryId,
+        initialized: false,
+        branch: null,
+        tracking: null,
+        ahead: 0,
+        behind: 0,
+        changes: 0,
+        fetchError: null,
+        children: [],
       }
-    }
+    })
+    const children = scanned.filter((child): child is RepositoryNode => child !== null)
     return {
       id,
       name: basename(root),
@@ -537,7 +616,12 @@ export class GitHistoryService {
       const push = await this.push(root, signal)
       if (push.exitCode !== 0) return fail('internal', (firstLine(push.stderr) ?? 'git push failed').slice(0, 500))
     }
-    return { ok: true, value: { branch: identity.branch, pulled: identity.behind, pushed: identity.ahead } }
+    // 同步后再读一次身份（合并后仅 1 条 status），客户端据此只替换该仓库节点，不必重扫整棵树。
+    const latest = await this.readIdentity(root, signal)
+    return {
+      ok: true,
+      value: { branch: latest.branch ?? identity.branch, pulled: identity.behind, pushed: identity.ahead, identity: latest },
+    }
   }
 
   /** 枚举仓库的本地与远程分支；列举前先尽力 fetch --prune 清掉远端已删分支的过期跟踪引用，并隐藏上游已删除的本地分支；detached HEAD 时 current 为 null。 */
@@ -603,6 +687,11 @@ export function createWorkspaceGate(workspaces: () => readonly { readonly path: 
   }
 }
 
+/** 按命令类别选择超时：只有访问远端的命令放宽，其余只读本地命令仍受 15s 保护。 */
+export function timeoutFor(argv: readonly string[]): number {
+  return argv.slice(0, 2).some(arg => NETWORK_COMMANDS.has(arg)) ? NETWORK_TIMEOUT_MS : LOCAL_TIMEOUT_MS
+}
+
 /** 将 DSH subprocess 能力适配为带超时、无交互凭据提示的 Git 执行器。 */
 export function subprocessRunner(ctx: { subprocess: { spawn(spec: {
   argv: readonly string[]
@@ -614,14 +703,16 @@ export function subprocessRunner(ctx: { subprocess: { spawn(spec: {
 }): { done: Promise<{ exitCode: number | null }>, collected: { stdout?: { readFrom(offset: number): { text: string } }, stderr?: { readFrom(offset: number): { text: string } } } } } }): GitRunner {
   return {
     async run(argv, cwd, signal) {
-      const timeoutSignal = AbortSignal.timeout(COMMAND_TIMEOUT_MS)
+      const timeoutSignal = AbortSignal.timeout(timeoutFor(argv))
       const combinedSignal = signal === undefined ? timeoutSignal : AbortSignal.any([signal, timeoutSignal])
       const handle = ctx.subprocess.spawn({
         argv: ['git', ...argv],
         cwd,
         stdio: { stdin: 'ignore', stdout: { maxBytes: MAX_OUTPUT_BYTES }, stderr: { maxBytes: MAX_ERROR_BYTES } },
         graceMs: 2_000,
-        env: { GIT_TERMINAL_PROMPT: '0' },
+        // GIT_OPTIONAL_LOCKS=0 只关闭「可选锁」（status 刷新后写回 index），必需锁照常获取；
+        // Windows 的文件锁是强制锁，关掉可选写可避免并发扫描时 index.lock 冲突。
+        env: { GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' },
         signal: combinedSignal,
       })
       const outcome = await handle.done

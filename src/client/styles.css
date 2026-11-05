@@ -38,6 +38,8 @@
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 16px;
   box-shadow: var(--dsw-shadow-lv4);
+  /* 把重绘范围收敛到面板内：分支菜单与提交详情层都 portal 到 body，不受该包含块影响。 */
+  contain: layout paint;
   overflow: hidden;
 }
 

@@ -28,6 +28,21 @@ export function readRepositorySnapshot(path: string, fetchRemote: boolean, signa
   return post('/api/dsh-git-history/snapshot', { path, fetch: fetchRemote }, signal)
 }
 
+const inflightSnapshots = new Map<string, Promise<ApiResult<RepositorySnapshot>>>()
+
+/**
+ * 合并同一（路径, fetch）的并发快照请求，避免开发态双跑或快速开关弹窗触发重复的全量扫描。
+ * 只合并正在飞行中的请求，不缓存已完成结果，因此不会返回陈旧数据。
+ */
+export function readRepositorySnapshotOnce(path: string, fetchRemote: boolean, signal?: AbortSignal): Promise<ApiResult<RepositorySnapshot>> {
+  const key = `${path}\u0000${fetchRemote}`
+  const running = inflightSnapshots.get(key)
+  if (running !== undefined) return running
+  const task = readRepositorySnapshot(path, fetchRemote, signal).finally(() => { inflightSnapshots.delete(key) })
+  inflightSnapshots.set(key, task)
+  return task
+}
+
 /** 分页读取指定仓库的提交历史。 */
 export function readHistory(request: HistoryRequest, signal?: AbortSignal): Promise<ApiResult<HistoryPage>> {
   return post('/api/dsh-git-history/log', request, signal)

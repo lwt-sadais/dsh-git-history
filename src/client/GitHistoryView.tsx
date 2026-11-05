@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { createPortal } from 'react-dom'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { BranchListResult, CommitDetail, CommitEntry, CommitFile, CommitFileSummary, DiffLine, RepositoryNode } from '../core/types.js'
-import { readBranches, readCommit, readCommitFile, readHistory, readRepositorySnapshot, switchBranch, syncRepository } from './api.js'
+import { readBranches, readCommit, readCommitFile, readHistory, readRepositorySnapshotOnce, switchBranch, syncRepository } from './api.js'
 
 export type GitHistoryViewProps = PropsRuntime<'conversation.input.left'> & PropsLocale<'git-history'>
 
@@ -13,6 +13,8 @@ const DIFF_OVERSCAN = 20
 const BRANCH_MENU_WIDTH = 300
 const BRANCH_MENU_GAP = 4
 const BRANCH_MENU_MARGIN = 8
+/** 复用同一格式化器：Intl 对象构造开销显著，逐条提交新建会拖慢首屏列表渲染。 */
+const DAY_FORMATTER = new Intl.DateTimeFormat(undefined, { year: 'numeric', month: '2-digit', day: '2-digit' })
 
 /** 同步与分支切换共用一个互斥标记，避免两种变更操作并发修改同一工作区。 */
 type BusyState = { readonly id: string, readonly kind: 'sync' | 'switch' } | null
@@ -37,6 +39,18 @@ function findRepository(repository: RepositoryNode | null, id: string): Reposito
   return null
 }
 
+/** 在仓库树中按标识局部替换一个节点的字段；未命中时原样返回，保证未变化的子树引用稳定。 */
+function patchRepository(repository: RepositoryNode, id: string, patch: Partial<RepositoryNode>): RepositoryNode {
+  if (repository.id === id) return { ...repository, ...patch }
+  let changed = false
+  const children = repository.children.map(child => {
+    const next = patchRepository(child, id, patch)
+    if (next !== child) changed = true
+    return next
+  })
+  return changed ? { ...repository, children } : repository
+}
+
 /** 将提交时间格式化为紧凑的本地相对时间或日期。 */
 function formatDate(value: string): string {
   const date = new Date(value)
@@ -46,7 +60,7 @@ function formatDate(value: string): string {
   if (hours < 1) return '刚刚'
   if (hours < 24) return `${hours} 小时前`
   if (days < 7) return `${days} 天前`
-  return new Intl.DateTimeFormat(undefined, { year: 'numeric', month: '2-digit', day: '2-digit' }).format(date)
+  return DAY_FORMATTER.format(date)
 }
 
 /** 判断分支显示值是否为分离 HEAD 状态。 */
@@ -431,7 +445,7 @@ export function GitHistoryView(props: GitHistoryViewProps) {
   const [hasMore, setHasMore] = useState(false)
   const [loading, setLoading] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
-  const [historyLoading, setHistoryLoading] = useState(false)
+  const [historyReady, setHistoryReady] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
   const [busy, setBusy] = useState<BusyState>(null)
   const [branchMenu, setBranchMenu] = useState<{ repository: RepositoryNode, anchor: DOMRect } | null>(null)
@@ -450,43 +464,72 @@ export function GitHistoryView(props: GitHistoryViewProps) {
   const [commitError, setCommitError] = useState<string | null>(null)
   const selectedRepository = useMemo(() => findRepository(repository, selectedId), [repository, selectedId])
   const activeCommitFile = activeFileId === null ? undefined : commitFiles.get(activeFileId)
+  /** 与 busy 同源的同步互斥标记：state 更新有延迟，同一帧内的连点需要在事件回调里立即生效。 */
+  const busyRef = useRef<BusyState>(null)
+  /** 每次打开弹窗只自动 fetch 一次；切仓库导致历史重新就绪时不应触发重复 fetch。 */
+  const autoFetchDone = useRef(false)
+  /** 首份快照是否仍未落地：用派生状态而非瞬时布尔，避免出现「无数据也没有加载中」的空白帧。 */
+  const snapshotPending = repository === null && error === null
 
-  /** 读取本地快照，并可选在后台 fetch 后刷新远程同步计数。 */
+  /** 读取本地快照，并可选在后台 fetch 后刷新远程同步计数；成功、失败、取消都保证复位加载标志。 */
   const loadSnapshot = useCallback(async (fetchRemote: boolean, signal?: AbortSignal) => {
     if (cwd === undefined || cwd === '') return
     fetchRemote ? setRefreshing(true) : setLoading(true)
     setError(null)
-    const result = await readRepositorySnapshot(cwd, fetchRemote, signal)
-    if (result.ok) {
-      setRepository(result.value.repository)
-      setSelectedId(current => {
-        const match = findRepository(result.value.repository, current)
-        return match?.initialized === true ? current : flattenRepositories(result.value.repository).find(item => item.initialized)?.id ?? ''
-      })
-    } else {
-      setError(result.error.message)
+    try {
+      const result = await readRepositorySnapshotOnce(cwd, fetchRemote, signal)
+      if (result.ok) {
+        setRepository(result.value.repository)
+        setSelectedId(current => {
+          const match = findRepository(result.value.repository, current)
+          return match?.initialized === true ? current : flattenRepositories(result.value.repository).find(item => item.initialized)?.id ?? ''
+        })
+      } else {
+        setError(result.error.message)
+      }
+    } catch (cause) {
+      if (cause instanceof DOMException && cause.name === 'AbortError') throw cause
+      setError(String(cause))
+    } finally {
+      fetchRemote ? setRefreshing(false) : setLoading(false)
     }
-    fetchRemote ? setRefreshing(false) : setLoading(false)
   }, [cwd])
 
+  // 工作区切换时清场；「点击打开」的清场放在入口回调里，使首帧直接进入加载态而不闪旧数据。
   useEffect(() => {
-    if (!open) return
     setRepository(null)
     setSelectedId('')
     setCommits([])
     setHasMore(false)
-    if (cwd === undefined || cwd === '') return
+    setHistoryReady(false)
+  }, [cwd])
+
+  useEffect(() => {
+    if (!open || cwd === undefined || cwd === '') return
     const controller = new AbortController()
-    void loadSnapshot(false, controller.signal).then(() => loadSnapshot(true, controller.signal)).catch(cause => {
+    void loadSnapshot(false, controller.signal).catch(cause => {
       if (!(cause instanceof DOMException && cause.name === 'AbortError')) setError(String(cause))
     })
     return () => controller.abort()
   }, [cwd, loadSnapshot, open])
 
+  // 首次打开自动 fetch：等首屏两个请求落地后再跑，避免与它们争抢 git 进程与同一仓库的 index。
+  useEffect(() => { if (!open) autoFetchDone.current = false }, [open])
+
+  useEffect(() => {
+    if (!open || !historyReady || autoFetchDone.current) return
+    autoFetchDone.current = true
+    const controller = new AbortController()
+    void loadSnapshot(true, controller.signal).catch(cause => {
+      if (!(cause instanceof DOMException && cause.name === 'AbortError')) setError(String(cause))
+    })
+    return () => controller.abort()
+  }, [historyReady, loadSnapshot, open])
+
   useEffect(() => {
     if (!open || cwd === undefined || cwd === '' || selectedRepository === null || !selectedRepository.initialized) return
     const controller = new AbortController()
-    setHistoryLoading(true)
+    setHistoryReady(false)
     setHistoryError(null)
     setCommits([])
     void readHistory({ path: cwd, repositoryId: selectedRepository.id, skip: 0, limit: PAGE_SIZE }, controller.signal).then(result => {
@@ -496,11 +539,9 @@ export function GitHistoryView(props: GitHistoryViewProps) {
       } else {
         setHistoryError(result.error.message)
       }
-      setHistoryLoading(false)
     }).catch(cause => {
       if (!(cause instanceof DOMException && cause.name === 'AbortError')) setHistoryError(String(cause))
-      setHistoryLoading(false)
-    })
+    }).finally(() => setHistoryReady(true))
     return () => controller.abort()
   }, [cwd, historyRevision, open, selectedRepository?.id])
 
@@ -550,40 +591,60 @@ export function GitHistoryView(props: GitHistoryViewProps) {
     return () => document.removeEventListener('keydown', close)
   }, [open, selectedCommit, branchMenu, pendingSwitch])
 
-  /** 同步指定仓库，并在成功后刷新仓库计数和当前提交历史。 */
+  /** 同步指定仓库：数据刷新落地后才宣布完成，成功、失败、异常三条路径都不遗留转圈。 */
   const sync = useCallback(async (item: RepositoryNode) => {
-    if (cwd === undefined || cwd === '' || busy !== null) return
+    if (cwd === undefined || cwd === '' || busyRef.current !== null) return
+    const state: BusyState = { id: item.id, kind: 'sync' }
+    busyRef.current = state
     setSelectedId(item.id)
-    setBusy({ id: item.id, kind: 'sync' })
+    setBusy(state)
     setSyncMessage(null)
     setSyncError(null)
-    const result = await syncRepository({ path: cwd, repositoryId: item.id })
-    if (result.ok) {
+    try {
+      const result = await syncRepository({ path: cwd, repositoryId: item.id })
+      if (!result.ok) {
+        setSyncError(result.error.message)
+        return
+      }
+      const identity = result.value.identity
+      // 宿主带回最新身份时只替换该仓库节点；缺省（旧宿主）时退回全量刷新。
+      // fetchError 随节点一起复位：原实现同步后重扫整树，该仓库的 fetch 警告同样会消失。
+      if (identity === undefined) await loadSnapshot(false)
+      else setRepository(current => current === null ? current : patchRepository(current, item.id, { ...identity, fetchError: null }))
       setSyncMessage(t('syncCompleted', { pulled: result.value.pulled, pushed: result.value.pushed }))
-      await loadSnapshot(false)
       setHistoryRevision(current => current + 1)
-    } else {
-      setSyncError(result.error.message)
+    } catch (cause) {
+      setSyncError(String(cause))
+    } finally {
+      busyRef.current = null
+      setBusy(null)
     }
-    setBusy(null)
-  }, [busy, cwd, loadSnapshot, t])
+  }, [cwd, loadSnapshot, t])
 
   /** 执行分支切换；成功后刷新仓库树与当前提交历史，失败透出 Git 首行错误。 */
   const performSwitch = useCallback(async (repositoryId: string, ref: string) => {
-    if (cwd === undefined || cwd === '' || busy !== null) return
-    setBusy({ id: repositoryId, kind: 'switch' })
+    if (cwd === undefined || cwd === '' || busyRef.current !== null) return
+    const state: BusyState = { id: repositoryId, kind: 'switch' }
+    busyRef.current = state
+    setBusy(state)
     setSyncMessage(null)
     setSyncError(null)
-    const result = await switchBranch({ path: cwd, repositoryId, branch: ref })
-    if (result.ok) {
-      setSyncMessage(t('switchCompleted', { branch: result.value.branch }))
+    try {
+      const result = await switchBranch({ path: cwd, repositoryId, branch: ref })
+      if (!result.ok) {
+        setSyncError(result.error.message)
+        return
+      }
       await loadSnapshot(false)
+      setSyncMessage(t('switchCompleted', { branch: result.value.branch }))
       setHistoryRevision(current => current + 1)
-    } else {
-      setSyncError(result.error.message)
+    } catch (cause) {
+      setSyncError(String(cause))
+    } finally {
+      busyRef.current = null
+      setBusy(null)
     }
-    setBusy(null)
-  }, [busy, cwd, loadSnapshot, t])
+  }, [cwd, loadSnapshot, t])
 
   /** 用户在菜单中选定分支：存在未提交变更时先要求确认，否则直接执行。 */
   const chooseBranch = useCallback((item: RepositoryNode, ref: string, remote: boolean) => {
@@ -602,24 +663,45 @@ export function GitHistoryView(props: GitHistoryViewProps) {
   const loadMore = useCallback(async () => {
     if (cwd === undefined || cwd === '' || selectedRepository === null || loadingMore || !hasMore) return
     setLoadingMore(true)
-    const result = await readHistory({
-      path: cwd,
-      repositoryId: selectedRepository.id,
-      skip: commits.length,
-      limit: PAGE_SIZE,
-    })
-    if (result.ok) {
-      setCommits(current => [...current, ...result.value.commits])
-      setHasMore(result.value.hasMore)
-    } else {
-      setHistoryError(result.error.message)
+    try {
+      const result = await readHistory({
+        path: cwd,
+        repositoryId: selectedRepository.id,
+        skip: commits.length,
+        limit: PAGE_SIZE,
+      })
+      if (result.ok) {
+        setCommits(current => [...current, ...result.value.commits])
+        setHasMore(result.value.hasMore)
+      } else {
+        setHistoryError(result.error.message)
+      }
+    } catch (cause) {
+      setHistoryError(String(cause))
+    } finally {
+      setLoadingMore(false)
     }
-    setLoadingMore(false)
   }, [commits.length, cwd, hasMore, loadingMore, selectedRepository])
 
   return (
     <div className="dghDock">
-      <button type="button" className="dghLauncher" onClick={() => setOpen(true)} aria-label={t('tab')} title={t('tab')}>
+      <button
+        type="button"
+        className="dghLauncher"
+        onClick={() => {
+          // 渲染前先清场：首帧直接进入加载态，不闪上一次的仓库树、提交列表与错误。
+          setRepository(null)
+          setSelectedId('')
+          setCommits([])
+          setHasMore(false)
+          setHistoryReady(false)
+          setError(null)
+          autoFetchDone.current = false
+          setOpen(true)
+        }}
+        aria-label={t('tab')}
+        title={t('tab')}
+      >
         <span className="dghLauncherIcon" aria-hidden="true">⑂</span>
         <span>{t('tab')}</span>
       </button>
@@ -641,7 +723,7 @@ export function GitHistoryView(props: GitHistoryViewProps) {
               </div>
             </header>
 
-            {cwd === undefined || cwd === '' ? <div className="dghState">{t('noWorkspace')}</div> : loading && repository === null ? <div className="dghState">{t('loading')}</div> : error !== null ? <div className="dghState dghError">{error}</div> : repository !== null && <div className="dghContent">
+            {cwd === undefined || cwd === '' ? <div className="dghState">{t('noWorkspace')}</div> : snapshotPending ? <div className="dghState">{t('loading')}</div> : error !== null ? <div className="dghState dghError">{error}</div> : repository !== null && <div className="dghContent">
               <aside className="dghRepositories">
                 <div className="dghRepositoriesTitle">{t('repositories')}</div>
                 <RepositoryTree repository={repository} selectedId={selectedId} depth={0} onSelect={item => setSelectedId(item.id)} onSync={item => void sync(item)} onOpenBranches={openBranches} busy={busy} menuRepositoryId={branchMenu?.repository.id ?? null} t={t} />
@@ -655,7 +737,7 @@ export function GitHistoryView(props: GitHistoryViewProps) {
                   {selectedRepository?.fetchError !== null && selectedRepository?.fetchError !== undefined && <span className="dghHistoryWarning" title={selectedRepository.fetchError}>{t('fetchFailed')}</span>}
                 </div>
                 <div className="dghHistory">
-                  {historyLoading ? <div className="dghState">{t('loadingHistory')}</div> : historyError !== null ? <div className="dghState dghError">{historyError}</div> : commits.length === 0 ? <div className="dghState">{t('noHistory')}</div> : <>
+                  {!historyReady ? <div className="dghState">{t('loadingHistory')}</div> : historyError !== null ? <div className="dghState dghError">{historyError}</div> : commits.length === 0 ? <div className="dghState">{t('noHistory')}</div> : <>
                     {commits.map(commit => <CommitRow key={commit.hash} commit={commit} onOpen={setSelectedCommit} />)}
                     {hasMore && <button type="button" className="dghLoadMore" disabled={loadingMore} onClick={() => void loadMore()}>
                       {loadingMore ? t('loadingMore') : t('loadMore')}

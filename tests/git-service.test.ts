@@ -1,6 +1,6 @@
 import { realpath } from 'node:fs/promises'
 import { describe, expect, it } from 'vitest'
-import { alignDiff, filterRemoteBranches, GitHistoryService, parseAheadBehind, parseBranchRefs, parseChangeCount, parseCommitFiles, parseHistory, parseLocalBranchRefs, parseSubmodulePaths, splitRemoteRef } from '../src/host/git-service.js'
+import { alignDiff, filterRemoteBranches, GitHistoryService, mapLimit, parseAheadBehind, parseBranchRefs, parseChangeCount, parseCommitFiles, parseHistory, parseLocalBranchRefs, parseStatusHeaders, parseSubmodulePaths, splitRemoteRef, timeoutFor } from '../src/host/git-service.js'
 
 /** 构造与宿主 git log 格式一致的一条测试记录。 */
 function historyRecord(fields: readonly string[]): string {
@@ -17,10 +17,18 @@ function commandRunner(root: string, ahead: number, behind: number, statusStdout
         calls.push([...argv])
         const command = argv.join(' ')
         if (command === 'rev-parse --show-toplevel') return { exitCode: 0, stdout: `${root}\n`, stderr: '' }
-        if (command === 'symbolic-ref --quiet --short HEAD') return { exitCode: 0, stdout: 'main\n', stderr: '' }
-        if (command === 'rev-parse --abbrev-ref --symbolic-full-name @{upstream}') return { exitCode: 0, stdout: 'origin/main\n', stderr: '' }
-        if (command === 'rev-list --left-right --count HEAD...@{upstream}') return { exitCode: 0, stdout: `${ahead}\t${behind}\n`, stderr: '' }
+        if (command === 'status --porcelain=v2 --branch --untracked-files=all') {
+          const headers = [
+            '# branch.oid 83dab3c1fbd76ffb168a83d32dc0d40f51359e28',
+            '# branch.head main',
+            '# branch.upstream origin/main',
+            `# branch.ab +${ahead} -${behind}`,
+            '',
+          ].join('\n')
+          return { exitCode: 0, stdout: `${headers}${statusStdout}`, stderr: '' }
+        }
         if (command === 'status --porcelain=v2 --untracked-files=all') return { exitCode: 0, stdout: statusStdout, stderr: '' }
+        if (command === 'rev-parse --short HEAD') return { exitCode: 0, stdout: '83dab3c\n', stderr: '' }
         return { exitCode: 0, stdout: '', stderr: '' }
       },
     },
@@ -53,6 +61,56 @@ describe('Git 输出解析', () => {
       'submodule.form.path src/dt-form-process-h5',
       '',
     ].join('\n'))).toEqual(['src/dt-common-mp', 'src/dt-form-process-h5'])
+  })
+
+  it('解析 porcelain=v2 的分支头字段', () => {
+    expect(parseStatusHeaders([
+      '# branch.oid 83dab3c1fbd76ffb168a83d32dc0d40f51359e28',
+      '# branch.head main',
+      '# branch.upstream origin/main',
+      '# branch.ab +2 -3',
+      '',
+    ].join('\r\n'))).toEqual({ head: 'main', upstream: 'origin/main', ahead: 2, behind: 3, hasAheadBehind: true })
+  })
+
+  it('分离 HEAD 时分支头为 detached，且缺少上游计数', () => {
+    expect(parseStatusHeaders([
+      '# branch.oid e1dcfed3f6e80c86e889ef21b90dae283f5c03cd',
+      '# branch.head (detached)',
+      '',
+    ].join('\n'))).toEqual({ head: null, upstream: null, ahead: 0, behind: 0, hasAheadBehind: false })
+  })
+
+  it('上游引用已消失时只输出 branch.upstream、不输出 branch.ab', () => {
+    // 与实测一致：该场景旧实现的 rev-parse @{upstream} 会失败，因此必须判定为「无上游」。
+    expect(parseStatusHeaders([
+      '# branch.oid 98145b55c072d44c9902fb1ad01985397aaae42e',
+      '# branch.head master',
+      '# branch.upstream origin/same',
+      '',
+    ].join('\n'))).toEqual({ head: 'master', upstream: 'origin/same', ahead: 0, behind: 0, hasAheadBehind: false })
+  })
+
+  it('并发映射保持输入顺序且不超过并发上限', async () => {
+    let running = 0
+    let peak = 0
+    const results = await mapLimit([0, 1, 2, 3, 4, 5, 6, 7], 3, async item => {
+      running += 1
+      peak = Math.max(peak, running)
+      await new Promise(resolve => setTimeout(resolve, 5))
+      running -= 1
+      return item * 10
+    })
+    expect(results).toEqual([0, 10, 20, 30, 40, 50, 60, 70])
+    expect(peak).toBeLessThanOrEqual(3)
+  })
+
+  it('按命令类别选择超时：远端命令放宽，只读命令保持 15s', () => {
+    expect(timeoutFor(['fetch', '--prune'])).toBe(60_000)
+    expect(timeoutFor(['pull', '--ff-only'])).toBe(60_000)
+    expect(timeoutFor(['push'])).toBe(60_000)
+    expect(timeoutFor(['--no-pager', 'log', '--max-count=21'])).toBe(15_000)
+    expect(timeoutFor(['status', '--porcelain=v2', '--branch'])).toBe(15_000)
   })
 
   it('对齐替换行并生成双侧标记', () => {
@@ -176,11 +234,48 @@ describe('Git 同步', () => {
     const snapshot = await service.snapshot(root, false)
     expect(snapshot.ok).toBe(true)
     calls.length = 0
-    await expect(service.sync({ path: root, repositoryId: '' })).resolves.toEqual({
+    const synced = await service.sync({ path: root, repositoryId: '' })
+    // 同步结束会重读一次身份供客户端局部更新，因此这里断言返回值而不是整体命令序列
+    expect(synced).toMatchObject({
       ok: true,
-      value: { branch: 'main', pulled: 3, pushed: 2 },
+      value: { branch: 'main', pulled: 3, pushed: 2, identity: { branch: 'main', tracking: 'origin/main', ahead: 2, behind: 3 } },
     })
-    expect(calls.slice(-2)).toEqual([['pull', '--ff-only'], ['push']])
+    expect(calls.filter(argv => argv[0] === 'pull' || argv[0] === 'push').map(argv => argv.slice(0, 2))).toEqual([
+      ['pull', '--ff-only'],
+      ['push'],
+    ])
+  })
+
+  it('身份探测只发一条 status 命令', async () => {
+    const root = await realpath(process.cwd())
+    const { calls, runner } = commandRunner(root, 1, 0)
+    const service = new GitHistoryService(runner, { async resolve() { return { ok: true, value: root } } })
+
+    await service.snapshot(root, false)
+    // 其余命令（rev-parse --show-toplevel、config --file .gitmodules）不属于身份探测
+    const identityCalls = calls.filter(argv => argv[0] === 'status' || argv[0] === 'symbolic-ref' || argv[0] === 'rev-list')
+    expect(identityCalls.map(argv => argv.join(' '))).toEqual(['status --porcelain=v2 --branch --untracked-files=all'])
+  })
+
+  it('status 不可用时退回逐条探测', async () => {
+    const root = await realpath(process.cwd())
+    const runner = {
+      async run(argv: readonly string[]) {
+        const command = argv.join(' ')
+        if (command === 'rev-parse --show-toplevel') return { exitCode: 0, stdout: `${root}\n`, stderr: '' }
+        if (command === 'status --porcelain=v2 --branch --untracked-files=all') return { exitCode: null, stdout: '', stderr: '' }
+        if (command === 'symbolic-ref --quiet --short HEAD') return { exitCode: 0, stdout: 'release\n', stderr: '' }
+        if (command === 'rev-parse --abbrev-ref --symbolic-full-name @{upstream}') return { exitCode: 0, stdout: 'origin/release\n', stderr: '' }
+        if (command === 'rev-list --left-right --count HEAD...@{upstream}') return { exitCode: 0, stdout: '4\t1\n', stderr: '' }
+        return { exitCode: 0, stdout: '', stderr: '' }
+      },
+    }
+    const service = new GitHistoryService(runner, { async resolve() { return { ok: true, value: root } } })
+
+    await expect(service.snapshot(root, false)).resolves.toMatchObject({
+      ok: true,
+      value: { repository: { branch: 'release', tracking: 'origin/release', ahead: 4, behind: 1 } },
+    })
   })
 
   it('没有同步差异时不执行 pull 或 push', async () => {

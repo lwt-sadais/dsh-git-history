@@ -114,6 +114,19 @@ interface SyncResult {
   readonly branch: string | null;
   readonly pulled: number;
   readonly pushed: number;
+  /**
+   * 同步后的最新上游状态。
+   * 客户端据此只替换该仓库节点，避免为更新两个数字而重扫整棵仓库树；缺省时客户端退回全量刷新。
+   */
+  readonly identity?: SyncIdentity;
+}
+/** 一次身份探测的结果，与 RepositoryNode 的同名字段一一对应。 */
+interface SyncIdentity {
+  readonly branch: string | null;
+  readonly tracking: string | null;
+  readonly ahead: number;
+  readonly behind: number;
+  readonly changes: number;
 }
 interface ApiError {
   readonly code: 'workspace-unknown' | 'not-git-repository' | 'repository-unknown' | 'branch-unknown' | 'commit-unknown' | 'manifest-stale' | 'file-unknown' | 'too-large' | 'invalid-request' | 'internal';
@@ -166,15 +179,24 @@ declare class GitHistoryService {
   private resolveRepository;
   /** 枚举本地分支（含上游删除状态）、远程跟踪引用、远程名和当前分支，供分支列表与切换校验复用。 */
   private readRefs;
-  /** 探测仓库当前分支、跟踪分支、同步计数和本地未提交变更数。 */
+  /**
+   * 探测仓库当前分支、跟踪分支、同步计数和本地未提交变更数。
+   * porcelain=v2 的 `# branch.*` 头已含分支、上游与领先/落后计数，一次 status 即可取全，
+   * 省掉原先 5 次独立子进程；detached HEAD 仍补一次 rev-parse，保持「detached@短哈希」口径不变。
+   */
   private readIdentity;
+  /** status 不可用（超时被杀、仓库损坏）时退回逐条探测，保证异常路径与原实现给出相同的身份数据。 */
+  private readIdentityFallback;
   /** 在明确请求时更新远程跟踪引用；失败仅记录在对应仓库节点上。 */
   private fetch;
   /** 先尝试快进拉取，失败时按 EnsoAI 行为改用 rebase，并在冲突后清理 rebase 状态。 */
   private pull;
   /** 推送被远端拒绝时先同步新增远端提交，再按 EnsoAI 行为重试一次。 */
   private push;
-  /** 递归扫描一个已初始化仓库，并建立仅供当前工作区使用的仓库路径清单。 */
+  /**
+   * 递归扫描一个已初始化仓库，并建立仅供当前工作区使用的仓库路径清单。
+   * concurrency 控制本级子模块的并发宽度；递归到下一层时固定降为 1，避免 4^depth 的进程风暴。
+   */
   private scanRepository;
   /** 读取当前工作区仓库树，并按需自动 fetch 根仓库及递归子模块。 */
   snapshot(path: string, shouldFetch: boolean, signal?: AbortSignal): Promise<ApiResult<RepositorySnapshot>>;
@@ -200,5 +222,5 @@ declare const inject: string[];
 /** 组装工作区访问门、Git 服务和本地 API，并交由 Cordis 管理生命周期。 */
 declare function apply(ctx: Context): void;
 //#endregion
-export { type ApiError, type ApiResult, type BranchListRequest, type BranchListResult, type ChangeKind, type ChangeMarker, type CommitDetail, type CommitDetailRequest, type CommitEntry, type CommitFile, type CommitFileRequest, type CommitFileSummary, type DiffLine, type DiffRow, GitHistoryService, type HistoryPage, type HistoryRequest, type RepositoryNode, type RepositorySnapshot, type SnapshotRequest, type SwitchBranchRequest, type SwitchBranchResult, type SyncRequest, type SyncResult, alignDiff, apply, inject, name, parseAheadBehind, parseCommitFiles, parseHistory, parseSubmodulePaths };
+export { type ApiError, type ApiResult, type BranchListRequest, type BranchListResult, type ChangeKind, type ChangeMarker, type CommitDetail, type CommitDetailRequest, type CommitEntry, type CommitFile, type CommitFileRequest, type CommitFileSummary, type DiffLine, type DiffRow, GitHistoryService, type HistoryPage, type HistoryRequest, type RepositoryNode, type RepositorySnapshot, type SnapshotRequest, type SwitchBranchRequest, type SwitchBranchResult, type SyncIdentity, type SyncRequest, type SyncResult, alignDiff, apply, inject, name, parseAheadBehind, parseCommitFiles, parseHistory, parseSubmodulePaths };
 //# sourceMappingURL=index.d.ts.map
